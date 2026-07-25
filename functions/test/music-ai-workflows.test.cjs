@@ -93,6 +93,27 @@ test("merges workflow outputs while preserving flat keys and namespacing collisi
   });
 });
 
+test("preserves Music.ai beatMap and chordMap artifact names through workflow merging", () => {
+  const merged = mergeMusicAiWorkflowResults([
+    {
+      workflow: { key: "mapping", slug: "stemulate-harmony-beats" },
+      sources: [
+        { key: "beatMap", url: "https://cdn.music.ai/mapping/beat-map.json" },
+        { key: "chordMap", url: "https://cdn.music.ai/mapping/chord-map.json" },
+      ],
+      analysis: { bpm: 96, key: "D Major" },
+    },
+  ]);
+
+  assert.deepEqual(merged, {
+    sources: [
+      { key: "beatMap", url: "https://cdn.music.ai/mapping/beat-map.json" },
+      { key: "chordMap", url: "https://cdn.music.ai/mapping/chord-map.json" },
+    ],
+    analysis: { bpm: 96, key: "D Major" },
+  });
+});
+
 test("classifies per-workflow submission checkpoints without risking duplicate paid jobs", () => {
   const now = 1_000_000;
   assert.equal(

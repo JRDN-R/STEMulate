@@ -52,9 +52,12 @@ import {
 import {
   createPanController,
   isStemAudible,
-  StemAudioGraph,
 } from "./lib/audioMixer";
 import { validateRemoteImportUrl } from "./lib/remoteSources";
+import {
+  StemTransport,
+  type StemLoadProgress,
+} from "./lib/stemTransport";
 import {
   initialStemStates,
   isAudioStemId,
@@ -69,7 +72,6 @@ import {
 import type { SongLibraryItem } from "./lib/songLibrary";
 import type {
   AnalysisData,
-  AudioStemId,
   BeatEvent,
   ChordEvent,
   ProcessingStage,
@@ -559,17 +561,19 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [exportBusy, setExportBusy] = useState<"mix" | "stems" | null>(null);
   const [exportProgress, setExportProgress] = useState("");
+  const [audioLoadStatus, setAudioLoadStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [audioLoadDetail, setAudioLoadDetail] = useState("");
   const [remoteResumeTrigger, setRemoteResumeTrigger] = useState(0);
   const [remoteRecoveryPending, setRemoteRecoveryPending] = useState(false);
 
-  const audioElements = useRef<Partial<Record<AudioStemId, HTMLAudioElement>>>({});
+  const stemTransport = useRef<StemTransport | null>(null);
+  const audioLoadController = useRef<AbortController | null>(null);
+  const audioLoadPromise = useRef<Promise<unknown> | null>(null);
   const localObjectUrl = useRef<string | null>(null);
   const processingController = useRef<AbortController | null>(null);
   const remoteResumeTimer = useRef<number | null>(null);
   const remoteResumeFailures = useRef(0);
   const loopRef = useRef({ enabled: loopEnabled, start: loopStart, end: loopEnd });
-  const audioContext = useRef<AudioContext | null>(null);
-  const audioGraph = useRef(new StemAudioGraph());
   const lastBeatIndex = useRef(-1);
   const countInToken = useRef(0);
   const countInActive = useRef(false);
@@ -577,6 +581,13 @@ export default function App() {
   const appShellRef = useRef<HTMLElement>(null);
   const controlDockRef = useRef<HTMLDivElement>(null);
   const bottomNavRef = useRef<HTMLElement>(null);
+
+  const getStemTransport = useCallback(() => {
+    if (!stemTransport.current || stemTransport.current.getSnapshot().status === "disposed") {
+      stemTransport.current = new StemTransport();
+    }
+    return stemTransport.current;
+  }, []);
 
   const hasAudioSources = Object.values(audioSources).some(Boolean);
   const clickGrid = useMemo(
@@ -682,76 +693,104 @@ export default function App() {
     countInActive.current = false;
     setIsCountingIn(false);
     setCountdownBeat(null);
-    const existing = audioElements.current;
-    audioGraph.current.disconnect();
-    Object.values(existing).forEach((audio) => {
-      if (!audio) return;
-      audio.pause();
-      audio.muted = false;
-      audio.loop = false;
-    });
-    const next: Partial<Record<AudioStemId, HTMLAudioElement>> = {};
-    const entries = Object.entries(audioSources).filter((entry): entry is [AudioStemId, string] => Boolean(entry[1]));
-    entries.forEach(([id, src]) => {
-      const audio = new Audio();
-      audio.crossOrigin = "anonymous";
-      audio.preload = "metadata";
-      audio.setAttribute("playsinline", "");
-      audio.src = src;
-      next[id] = audio;
-    });
-    audioElements.current = next;
-    const clock = Object.values(next)[0];
-    if (clock) {
-      clock.addEventListener("loadedmetadata", () => {
-        if (Number.isFinite(clock.duration)) {
-          setDuration(clock.duration);
-          setAnalysis((current) => current.stems && Object.keys(current.stems).length ? current : demoAnalysis(clock.duration));
-        }
-      });
-      clock.addEventListener("timeupdate", () => {
-        if (countInActive.current) return;
-        const loop = loopRef.current;
-        if (loop.enabled && clock.currentTime >= loop.end) {
-          Object.values(audioElements.current).forEach((audio) => { if (audio) audio.currentTime = loop.start; });
-          setCurrentTime(loop.start);
-          return;
-        }
-        setCurrentTime(clock.currentTime);
-      });
-      clock.addEventListener("ended", () => setIsPlaying(false));
+    setIsPlaying(false);
+    setCurrentTime(0);
+    audioLoadController.current?.abort();
+    const controller = new AbortController();
+    audioLoadController.current = controller;
+    const transport = getStemTransport();
+    const hasSources = Object.values(audioSources).some(Boolean);
+    if (!hasSources) {
+      transport.unload();
+      audioLoadPromise.current = null;
+      setAudioLoadStatus("idle");
+      setAudioLoadDetail("");
+      return () => controller.abort();
     }
+
+    setAudioLoadStatus("loading");
+    setAudioLoadDetail("Preparing one synchronized audio clock");
+    const load = transport.load(audioSources, {
+      signal: controller.signal,
+      onProgress: (progress: StemLoadProgress) => {
+        if (controller.signal.aborted) return;
+        const action = progress.phase === "fetching"
+          ? "Loading"
+          : progress.phase === "decoding"
+            ? "Decoding"
+            : "Ready";
+        setAudioLoadDetail(`${action} ${progress.id} · ${progress.index}/${progress.total}`);
+      },
+    });
+    audioLoadPromise.current = load;
+    void load.then(
+      (result) => {
+        if (controller.signal.aborted || audioLoadPromise.current !== load) return;
+        setDuration(result.duration);
+        setCurrentTime(0);
+        // Loading clamps loop points to the new buffer duration. Reapply the
+        // UI's requested range so replacing a short song with a longer one
+        // does not leave the transport stuck with the old shortened loop.
+        transport.setLoop(loopRef.current);
+        setAnalysis((current) => Object.keys(current.stems).length
+          ? current
+          : demoAnalysis(result.duration));
+        setAudioLoadStatus("ready");
+        setAudioLoadDetail(`${result.loadedStemIds.length} stems sample-locked`);
+      },
+      (error) => {
+        if (controller.signal.aborted || audioLoadPromise.current !== load) return;
+        const message = error instanceof Error ? error.message : "The synchronized audio could not be loaded.";
+        setAudioLoadStatus("error");
+        setAudioLoadDetail(message);
+        setToast(message);
+      },
+    );
+
     return () => {
-      audioGraph.current.disconnect();
-      Object.values(next).forEach((audio) => {
-        if (!audio) return;
-        audio.pause();
-        audio.muted = false;
-        audio.loop = false;
-      });
+      controller.abort();
+      if (audioLoadController.current === controller) audioLoadController.current = null;
     };
-  }, [audioSources]);
+  }, [audioSources, getStemTransport]);
 
   useEffect(() => {
-    const context = audioContext.current;
-    if (context) {
-      audioGraph.current.connect(context, audioElements.current);
-      audioGraph.current.update(stems, playbackRate);
-      return;
-    }
-    Object.values(audioElements.current).forEach((audio) => {
-      if (!audio) return;
-      audio.volume = 1;
-      audio.playbackRate = playbackRate;
-    });
-  }, [stems, playbackRate, audioSources]);
+    getStemTransport().setMix(stems);
+  }, [getStemTransport, stems]);
 
-  useEffect(() => () => {
-    audioGraph.current.disconnect();
-    const context = audioContext.current;
-    audioContext.current = null;
-    if (context && context.state !== "closed") void context.close();
-  }, []);
+  useEffect(() => {
+    getStemTransport().setPlaybackRate(playbackRate);
+  }, [getStemTransport, playbackRate]);
+
+  useEffect(() => {
+    const transport = getStemTransport();
+    transport.setLoop({
+      enabled: loopEnabled,
+      start: loopStart,
+      end: loopEnd,
+    });
+    if (hasAudioSources) setCurrentTime(transport.getCurrentTime());
+  }, [getStemTransport, hasAudioSources, loopEnabled, loopStart, loopEnd]);
+
+  useEffect(() => {
+    const transport = getStemTransport();
+    const unsubscribeEnded = transport.onEnded(() => {
+      setCurrentTime(transport.getCurrentTime());
+      setIsPlaying(false);
+      lastBeatIndex.current = -1;
+    });
+    return () => {
+      unsubscribeEnded();
+      audioLoadController.current?.abort();
+      audioLoadController.current = null;
+      audioLoadPromise.current = null;
+      transport.dispose();
+      if (stemTransport.current === transport) stemTransport.current = null;
+      if (localObjectUrl.current) {
+        URL.revokeObjectURL(localObjectUrl.current);
+        localObjectUrl.current = null;
+      }
+    };
+  }, [getStemTransport]);
 
   useEffect(() => {
     if (!isPlaying || hasAudioSources) return;
@@ -773,29 +812,17 @@ export default function App() {
   useEffect(() => {
     if (!isPlaying || !hasAudioSources) return;
     let frame = 0;
-    let tickCount = 0;
     const tick = () => {
-      const media = Object.values(audioElements.current).filter(Boolean) as HTMLAudioElement[];
-      const clock = media[0];
-      if (clock) {
-        setCurrentTime(clock.currentTime);
-        if (tickCount % 12 === 0) {
-          media.slice(1).forEach((audio) => {
-            if (Math.abs(audio.currentTime - clock.currentTime) > 0.08) audio.currentTime = clock.currentTime;
-          });
-        }
-      }
-      tickCount += 1;
+      setCurrentTime(getStemTransport().getCurrentTime());
       frame = window.requestAnimationFrame(tick);
     };
     frame = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frame);
-  }, [hasAudioSources, isPlaying]);
+  }, [getStemTransport, hasAudioSources, isPlaying]);
 
   const clickBeat = useCallback((accent: boolean) => {
     if (!metronomeEnabled) return;
-    const context = audioContext.current;
-    if (!context) return;
+    const context = getStemTransport().getAudioContext();
     const oscillator = context.createOscillator();
     const gain = context.createGain();
     const pan = createPanController(context);
@@ -810,7 +837,7 @@ export default function App() {
     oscillator.connect(gain).connect(pan.node).connect(context.destination);
     oscillator.start();
     oscillator.stop(context.currentTime + 0.06);
-  }, [metronomeEnabled, stems]);
+  }, [getStemTransport, metronomeEnabled, stems]);
 
   useEffect(() => {
     if (!isPlaying || !metronomeEnabled || !clickGrid.length) return;
@@ -844,79 +871,73 @@ export default function App() {
 
   const seek = useCallback((time: number) => {
     const next = Math.max(0, Math.min(duration, time));
-    Object.values(audioElements.current).forEach((audio) => { if (audio) audio.currentTime = next; });
-    setCurrentTime(next);
+    if (hasAudioSources) {
+      const transport = getStemTransport();
+      transport.seek(next);
+      setCurrentTime(transport.getCurrentTime());
+    } else {
+      setCurrentTime(next);
+    }
     lastBeatIndex.current = -1;
-  }, [duration]);
+  }, [duration, getStemTransport, hasAudioSources]);
 
   const togglePlayback = useCallback(async () => {
-    const media = Object.values(audioElements.current).filter(Boolean) as HTMLAudioElement[];
+    const transport = getStemTransport();
     if (isCountingIn) {
       countInToken.current += 1;
       countInActive.current = false;
-      media.forEach((audio) => {
-        audio.pause();
-        audio.muted = false;
-        audio.loop = false;
-        audio.currentTime = currentTime;
-      });
       setIsCountingIn(false);
       setCountdownBeat(null);
       return;
     }
     if (isPlaying) {
-      media.forEach((audio) => audio.pause());
+      if (hasAudioSources) {
+        transport.pause();
+        setCurrentTime(transport.getCurrentTime());
+      }
       setIsPlaying(false);
       return;
     }
+    if (hasAudioSources && audioLoadStatus !== "ready") {
+      setToast(audioLoadStatus === "error"
+        ? audioLoadDetail || "The synchronized stems are unavailable."
+        : "Wait for the selected stems to finish loading, then tap Play.");
+      return;
+    }
 
-    if (!audioContext.current) audioContext.current = new AudioContext();
-    audioGraph.current.connect(audioContext.current, audioElements.current);
-    audioGraph.current.update(stems, playbackRate);
-    const resumeAudioContext = audioContext.current.state === "suspended"
-      ? audioContext.current.resume()
-      : Promise.resolve();
+    const token = ++countInToken.current;
+    // Invoke resume() from the original tap before awaiting stem downloads.
+    // This preserves iOS user activation while every decoded source still
+    // starts later on one shared AudioContext timestamp.
+    const unlock = transport.unlock();
+    try {
+      if (hasAudioSources) {
+        const loading = audioLoadPromise.current;
+        await Promise.all([unlock, loading ?? Promise.resolve()]);
+      } else {
+        await unlock;
+      }
+    } catch (error) {
+      if (countInToken.current !== token) return;
+      countInActive.current = false;
+      setIsCountingIn(false);
+      setCountdownBeat(null);
+      setToast(error instanceof Error
+        ? error.message
+        : "Playback is blocked. Tap play again to unlock audio on this device.");
+      return;
+    }
+    if (countInToken.current !== token) return;
+
     const shouldCountIn = metronomeEnabled
       && countIn > 0
       && currentTime < 0.25
       && analysis.bpm > 0;
     const playStart = currentTime;
-    const token = shouldCountIn ? ++countInToken.current : countInToken.current;
 
     if (shouldCountIn) {
       countInActive.current = true;
-      media.forEach((audio) => {
-        audio.muted = true;
-        audio.loop = true;
-      });
       setIsCountingIn(true);
-    }
-
-    // Invoke every media play synchronously in the original tap. This unlocks
-    // Safari audio before the asynchronous count-in consumes user activation.
-    const startMedia = media.map((audio) => audio.play());
-    try {
-      await Promise.all([resumeAudioContext, ...startMedia]);
-    } catch {
-      media.forEach((audio) => {
-        audio.pause();
-        audio.muted = false;
-        audio.loop = false;
-      });
-      countInActive.current = false;
-      setIsCountingIn(false);
-      setCountdownBeat(null);
-      if (countInToken.current === token) setToast("Playback is blocked. Tap play again to unlock audio on this device.");
-      return;
-    }
-
-    if (countInToken.current !== token) {
-      media.forEach((audio) => {
-        audio.pause();
-        audio.muted = false;
-        audio.loop = false;
-      });
-      return;
     }
 
     if (shouldCountIn) {
@@ -929,18 +950,44 @@ export default function App() {
         await sleep((60 / Math.max(1, analysis.bpm * playbackRate)) * 1000);
       }
       if (countInToken.current !== token) return;
-      media.forEach((audio) => {
-        audio.loop = false;
-        audio.currentTime = playStart;
-        audio.muted = false;
-      });
       setCurrentTime(playStart);
       countInActive.current = false;
       setIsCountingIn(false);
       setCountdownBeat(null);
     }
+
+    try {
+      if (hasAudioSources) {
+        transport.seek(playStart);
+        await transport.play();
+      }
+    } catch (error) {
+      if (countInToken.current !== token) return;
+      countInActive.current = false;
+      setIsCountingIn(false);
+      setCountdownBeat(null);
+      setToast(error instanceof Error ? error.message : "The synchronized audio could not start.");
+      return;
+    }
+    if (countInToken.current !== token) {
+      if (hasAudioSources) transport.pause();
+      return;
+    }
     setIsPlaying(true);
-  }, [analysis.bpm, clickBeat, countIn, currentTime, isCountingIn, isPlaying, metronomeEnabled, playbackRate]);
+  }, [
+    analysis.bpm,
+    audioLoadDetail,
+    audioLoadStatus,
+    clickBeat,
+    countIn,
+    currentTime,
+    getStemTransport,
+    hasAudioSources,
+    isCountingIn,
+    isPlaying,
+    metronomeEnabled,
+    playbackRate,
+  ]);
 
   const updateStem = (id: StemId, patch: Partial<StemState>) => {
     setStems((current) => current.map((stem) => stem.id === id ? { ...stem, ...patch } : stem));
@@ -1392,9 +1439,13 @@ export default function App() {
             <p className="engine-limit" aria-live="polite">
               {exportBusy
                 ? exportProgress
-                : availableStemCount > 1
-                  ? "Web Audio gain, solo and stereo pan · mix export preserves these settings."
-                  : "Process a track to unlock functional mixing and exports."}
+                : audioLoadStatus === "loading"
+                  ? audioLoadDetail
+                  : audioLoadStatus === "error"
+                    ? audioLoadDetail
+                    : availableStemCount > 1
+                      ? `${audioLoadDetail || "Selected stems sample-locked"} · gain, solo and stereo pan stay live.`
+                      : "Process a track to unlock functional mixing and exports."}
             </p>
           </Panel>
 
@@ -1404,7 +1455,7 @@ export default function App() {
             <button type="button" className={`feature-toggle ${followTempoMap ? "active" : ""}`} aria-pressed={followTempoMap} onClick={() => setFollowTempoMap((value) => !value)}><span className="feature-icon"><Waves size={21} /></span><span><strong>Follow tempo map</strong><small>{followTempoMap ? "Natural timing changes stay intact" : "Locked to average BPM"}</small></span><i /></button>
             <div className="practice-grid">
               <div className="dial-card"><span>COUNT-IN</span><div><button type="button" aria-label="Decrease count-in" onClick={() => setCountIn((value) => Math.max(0, value - 1))}><Minus size={16} /></button><strong>{countIn}</strong><button type="button" aria-label="Increase count-in" onClick={() => setCountIn((value) => Math.min(4, value + 1))}><Plus size={16} /></button></div><small>bars</small></div>
-              <div className="dial-card"><span>SPEED</span><div><button type="button" aria-label="Decrease speed" onClick={() => setPlaybackRate((value) => Math.max(0.5, Math.round((value - 0.05) * 100) / 100))}><Minus size={16} /></button><strong>{playbackRate.toFixed(2)}×</strong><button type="button" aria-label="Increase speed" onClick={() => setPlaybackRate((value) => Math.min(1.5, Math.round((value + 0.05) * 100) / 100))}><Plus size={16} /></button></div><small>tempo</small></div>
+              <div className="dial-card"><span>SPEED</span><div><button type="button" aria-label="Decrease speed" onClick={() => setPlaybackRate((value) => Math.max(0.5, Math.round((value - 0.05) * 100) / 100))}><Minus size={16} /></button><strong>{playbackRate.toFixed(2)}×</strong><button type="button" aria-label="Increase speed" onClick={() => setPlaybackRate((value) => Math.min(1.5, Math.round((value + 0.05) * 100) / 100))}><Plus size={16} /></button></div><small>rate · pitch-linked</small></div>
               <div className="dial-card wide"><span>KEY / PITCH</span><div><button type="button" aria-label="Decrease pitch preview" onClick={() => setPitch((value) => Math.max(-12, value - 1))}>♭</button><strong>{pitch > 0 ? `+${pitch}` : pitch}</strong><button type="button" aria-label="Increase pitch preview" onClick={() => setPitch((value) => Math.min(12, value + 1))}>♯</button></div><small>Display preview only · audio pitch shift is not connected</small></div>
             </div>
             <div className="analysis-readout"><Gauge size={18} /><span><strong>{analysis.bpm > 0 ? `${Math.round(analysis.bpm)} BPM` : "Tempo unavailable"}</strong><small>{analysis.beats.length} beat markers · {analysis.chords.length} chord changes</small></span></div>
@@ -1419,7 +1470,23 @@ export default function App() {
         <div className="transport-row">
           <IconButton label="Toggle section loop" pressed={loopEnabled} className={loopEnabled ? "active" : ""} onClick={() => setLoopEnabled((value) => !value)}><Repeat2 size={21} /></IconButton>
           <IconButton label="Back 10 seconds" onClick={() => seek(currentTime - 10)}><RotateCcw size={21} /><small>10</small></IconButton>
-          <button type="button" className="play-button hardware-button" aria-label={isCountingIn ? "Cancel count-in" : isPlaying ? "Pause" : "Play"} onClick={() => void togglePlayback()}>{isCountingIn || isPlaying ? <Pause size={29} fill="currentColor" /> : <Play size={31} fill="currentColor" />}</button>
+          <button
+            type="button"
+            className="play-button hardware-button"
+            aria-label={isCountingIn
+              ? "Cancel count-in"
+              : isPlaying
+                ? "Pause"
+                : hasAudioSources && audioLoadStatus !== "ready"
+                  ? "Preparing synchronized audio"
+                  : "Play"}
+            disabled={hasAudioSources && audioLoadStatus !== "ready" && !isCountingIn && !isPlaying}
+            onClick={() => void togglePlayback()}
+          >
+            {isCountingIn || isPlaying
+              ? <Pause size={29} fill="currentColor" />
+              : <Play size={31} fill="currentColor" />}
+          </button>
           <IconButton label="Forward 10 seconds" onClick={() => seek(currentTime + 10)}><RotateCcw className="flip" size={21} /><small>10</small></IconButton>
           <IconButton label="Open practice controls" onClick={() => scrollTo("practice")}><SlidersHorizontal size={22} /></IconButton>
         </div>

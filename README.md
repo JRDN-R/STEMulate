@@ -15,8 +15,8 @@ workflow builds with its public App Check settings enabled.
 - owner-confirmed, single-track YouTube and Spotify import jobs through a private worker
 - Music.ai upload/job/status client contract
 - adaptive multi-stem playback controls for vocals, drums, bass, guitars,
-  piano, keys, strings, wind, and other when those URLs are returned
-  (sample-locked Web Audio scheduling is still future work)
+  piano, keys, strings, wind, and other when those URLs are returned; selected
+  stems are decoded and scheduled sample-locked on one Web Audio clock
 - beat-map-driven smart metronome with changing local timing (browser click
   scheduling, not yet studio-grade audio-clock scheduling)
 - chord timeline, detected key/BPM, and named song sections
@@ -25,7 +25,9 @@ workflow builds with its public App Check settings enabled.
 - offline app shell, web manifest, Apple touch icon, and iOS safe-area layout
 - GitHub Pages deployment workflow
 
-Pitch transposition is represented in the interface but still needs a production time-stretch/pitch-shift engine before it changes live audio.
+Pitch transposition is represented in the interface but still needs a
+production time-stretch/pitch-shift engine before it changes live audio. The
+sample-clocked transport currently changes speed and pitch together.
 
 ## Run on your Mac
 
@@ -137,4 +139,7 @@ spotDL does not export Spotify audio. It uses Spotify metadata to locate a match
 
 ## Install on iPhone
 
-Open the published URL in Safari, tap **Share**, choose **Add to Home Screen**, and leave **Open as Web App** enabled. The first Play tap unlocks web audio for the smart metronome.
+Open the published URL in Safari, tap **Share**, choose **Add to Home Screen**,
+and leave **Open as Web App** enabled. Selected stems are prepared on one shared
+audio clock; the first Play tap unlocks Web Audio and waits for that preparation
+to finish before playback starts.

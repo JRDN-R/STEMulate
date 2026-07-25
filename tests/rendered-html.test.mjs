@@ -134,3 +134,18 @@ test("never substitutes demo maps for missing live Music.ai analysis", async () 
   assert.match(app, /No section map was returned/);
   assert.match(client, /bpm:\s*Number\(bpmValue\)\s*\|\|\s*0/);
 });
+
+test("integrates the sample-clocked stem transport without media follower seeks", async () => {
+  const [app, transport] = await Promise.all([
+    readFile(new URL("src/App.tsx", root), "utf8"),
+    readFile(new URL("src/lib/stemTransport.ts", root), "utf8"),
+  ]);
+
+  assert.match(app, /new StemTransport\(\)/);
+  assert.match(app, /transport\.load\(audioSources/);
+  assert.match(app, /transport\.play\(\)/);
+  assert.doesNotMatch(app, /new Audio\(\)/);
+  assert.doesNotMatch(app, /Math\.abs\(audio\.currentTime\s*-\s*clock\.currentTime\)/);
+  assert.match(transport, /context\.createBufferSource\(\)/);
+  assert.match(transport, /const when = context\.currentTime \+ this\.scheduleAheadSeconds/);
+});

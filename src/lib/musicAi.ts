@@ -4,12 +4,9 @@ import { ref, uploadBytesResumable } from "firebase/storage";
 
 import type {
   AnalysisData,
-  BeatEvent,
-  ChordEvent,
   ProcessingStage,
   RemoteSourceProvider,
   RemoteTrackResult,
-  SectionEvent,
 } from "../types";
 import { spotifyImportEnabled } from "./backendConfig";
 import {
@@ -19,6 +16,11 @@ import {
   getStemulateFunctions,
   getStemulateStorage,
 } from "./firebase";
+import {
+  normalizeBeats,
+  normalizeChords,
+  normalizeSections,
+} from "./musicAnalysis";
 import { validateRemoteImportUrl } from "./remoteSources";
 import { normalizeStemOutputs } from "./stems";
 
@@ -253,24 +255,6 @@ async function resolveJson(value: unknown): Promise<unknown> {
   return value;
 }
 
-function asList(value: unknown, keys: string[]): unknown[] {
-  if (Array.isArray(value)) return value;
-  if (!value || typeof value !== "object") return [];
-  const record = value as Record<string, unknown>;
-  for (const key of keys) {
-    if (Array.isArray(record[key])) return record[key] as unknown[];
-  }
-  return [];
-}
-
-function pickNumber(record: Record<string, unknown>, keys: string[], fallback = 0) {
-  for (const key of keys) {
-    const value = Number(record[key]);
-    if (Number.isFinite(value)) return value;
-  }
-  return fallback;
-}
-
 function findValue(record: Record<string, unknown>, aliases: string[]): unknown {
   const normalizedAliases = aliases.map((alias) => alias.toLowerCase());
   const exact = Object.entries(record).find(([key]) =>
@@ -283,50 +267,6 @@ function findValue(record: Record<string, unknown>, aliases: string[]): unknown 
       normalized === alias || normalized.includes(`_${alias}`) || normalized.includes(`${alias}_`),
     );
   })?.[1];
-}
-
-function normalizeBeats(value: unknown): BeatEvent[] {
-  return asList(value, ["beats", "beatMap", "annotations"])
-    .map((entry, index) => {
-      const record = (entry || {}) as Record<string, unknown>;
-      return {
-        time: pickNumber(record, ["time", "start", "startTime"], 0),
-        beat: pickNumber(record, ["beat", "beatNumber", "number"], (index % 4) + 1),
-      };
-    })
-    .filter((entry) => entry.time >= 0)
-    .sort((a, b) => a.time - b.time);
-}
-
-function normalizeChords(value: unknown): ChordEvent[] {
-  return asList(value, ["chords", "chordMap", "annotations"])
-    .map((entry) => {
-      const record = (entry || {}) as Record<string, unknown>;
-      const chord = String(
-        record.chord || record.label || record.simplePop || record.complexPop || record.value || "N.C.",
-      );
-      return {
-        chord,
-        start: pickNumber(record, ["start", "startTime", "time"], 0),
-        end: pickNumber(record, ["end", "endTime"], 0),
-      };
-    })
-    .filter((entry) => entry.end > entry.start)
-    .sort((a, b) => a.start - b.start);
-}
-
-function normalizeSections(value: unknown): SectionEvent[] {
-  return asList(value, ["sections", "sectionsMap", "annotations"])
-    .map((entry) => {
-      const record = (entry || {}) as Record<string, unknown>;
-      return {
-        label: String(record.label || record.section || record.name || "Section"),
-        start: pickNumber(record, ["start", "startTime", "time"], 0),
-        end: pickNumber(record, ["end", "endTime"], 0),
-      };
-    })
-    .filter((entry) => entry.end > entry.start)
-    .sort((a, b) => a.start - b.start);
 }
 
 async function hydrateResult(result: Record<string, unknown>): Promise<AnalysisData> {
