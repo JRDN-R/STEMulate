@@ -1,6 +1,9 @@
 import { defineInt, defineSecret, defineString } from "firebase-functions/params";
 
 export const REGION = "us-central1";
+// Cloud Storage event functions must run in the bucket's physical region.
+// The stem-ulate.firebasestorage.app bucket was provisioned in us-east1.
+export const STORAGE_TRIGGER_REGION = "us-east1";
 
 // Callable CORS is intentionally explicit. GitHub Pages project paths share the
 // jrdn-r.github.io origin. Add a custom production origin before deploying it.
