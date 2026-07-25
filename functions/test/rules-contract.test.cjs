@@ -23,3 +23,20 @@ test("Firestore Rules keep internal downloader and Music.ai state private", asyn
   assert.match(rules, /allow get, list:\s*if isOwner\(userId\)/);
   assert.match(rules, /match \/\{document=\*\*\}[\s\S]*allow read, write:\s*if false/);
 });
+
+test("Storage upload trigger is colocated with the us-east1 bucket", async () => {
+  const config = await readFile(
+    path.join(projectRoot, "functions/src/config.ts"),
+    "utf8",
+  );
+  const functions = await readFile(
+    path.join(projectRoot, "functions/src/index.ts"),
+    "utf8",
+  );
+
+  assert.match(config, /STORAGE_TRIGGER_REGION\s*=\s*"us-east1"/);
+  assert.match(
+    functions,
+    /onObjectFinalized\(\s*\{\s*region:\s*STORAGE_TRIGGER_REGION,/,
+  );
+});
