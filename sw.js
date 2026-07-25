@@ -1,6 +1,11 @@
 const CACHE_PREFIX = "stemulate-shell-";
-const CACHE_NAME = `${CACHE_PREFIX}__STEMULATE_BUILD_ID__`;
-const BUILD_ASSETS = ["__STEMULATE_PRECACHE_ASSETS__"];
+const CACHE_NAME = `${CACHE_PREFIX}8932a39df4e8e338`;
+const BUILD_ASSETS = [
+  "./assets/firebase-BXxUg_ZN.js",
+  "./assets/index-DmXOKwV0.css",
+  "./assets/index-TxHGerV5.js",
+  "./assets/musicAi-BK6T9ZzK.js"
+];
 const APP_SHELL = [
   "./",
   "./index.html",
