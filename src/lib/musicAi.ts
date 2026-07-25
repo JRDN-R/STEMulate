@@ -57,7 +57,7 @@ type CreateRemoteJobResult = {
   status: "queued_for_download";
 };
 
-type CompletedJobResult = {
+export type CompletedJobResult = {
   analysis: AnalysisData;
   jobId: string;
   outputsExpireAt: number;
@@ -750,6 +750,48 @@ export function hasPendingRemoteTrack(): boolean {
 
 export function cancelPendingRemoteTrack(): void {
   forgetRemoteJob();
+}
+
+export async function loadProcessingJob(jobId: string): Promise<CompletedJobResult> {
+  if (!backendConfigured) {
+    throw new Error("The secure Firebase backend is not configured yet.");
+  }
+  const owner = getOwnerUser();
+  if (!owner) {
+    throw new Error("Sign in before opening a saved song.");
+  }
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) {
+    throw new Error("The saved song identifier is invalid.");
+  }
+
+  const snapshot = await getDoc(
+    doc(getStemulateFirestore(), `users/${owner.uid}/jobs/${jobId}`),
+  );
+  if (!snapshot.exists()) {
+    throw new TerminalJobError("The saved song no longer exists.");
+  }
+  const job = snapshot.data() as PublicJob;
+  if (job.status === "failed") {
+    throw new TerminalJobError(job.error?.message || "Music.ai could not process this track.");
+  }
+  if (job.status !== "completed") {
+    throw new TerminalJobError("This song is still processing.");
+  }
+
+  const materialized = await materializeResult(jobId, job);
+  rememberLatestCompletedJob({
+    jobId,
+    ownerUid: owner.uid,
+    expiresAt: materialized.expiresAt,
+    updatedAt: Date.now(),
+  });
+  return {
+    analysis: materialized.analysis,
+    jobId,
+    outputsExpireAt: materialized.expiresAt,
+    displayName: job.displayName,
+    sourceProvider: job.sourceProvider,
+  };
 }
 
 export async function refreshLatestOutputs(

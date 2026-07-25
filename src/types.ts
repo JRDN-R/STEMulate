@@ -11,6 +11,12 @@ export type {
   StemSources,
   StemState,
 } from "./lib/stems";
+export type {
+  StemSelection,
+  StemSelectionMode,
+  StemSelectionPreset,
+  StemSelectionPresetId,
+} from "./lib/stemSelection";
 
 export type ChordEvent = {
   chord: string;

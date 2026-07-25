@@ -97,6 +97,11 @@ interface GetOutputsInput {
   jobId?: unknown;
 }
 
+interface RenameJobInput {
+  jobId?: unknown;
+  displayName?: unknown;
+}
+
 interface SubmitTaskData {
   jobId: string;
   ownerUid: string;
@@ -685,6 +690,45 @@ export const getProcessingOutputs = onCall<GetOutputsInput>(
         };
       })),
     };
+  },
+);
+
+export const renameProcessingJob = onCall<RenameJobInput>(
+  {
+    cors: CALLABLE_CORS,
+    enforceAppCheck: true,
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (request) => {
+    const ownerUid = requireOwner(request);
+    const jobId = requiredString(request.data.jobId, "jobId", 128);
+    const displayName = requiredString(request.data.displayName, "displayName", 120);
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) {
+      throw new HttpsError("invalid-argument", "jobId is invalid.");
+    }
+    if (/[\u0000-\u001f\u007f]/.test(displayName)) {
+      throw new HttpsError("invalid-argument", "displayName contains unsupported characters.");
+    }
+
+    const jobRef = publicJobRef(ownerUid, jobId);
+    await db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(jobRef);
+      if (!snapshot.exists) {
+        throw new HttpsError("not-found", "The processing job does not exist.");
+      }
+      const job = snapshot.data();
+      if (!job || job.ownerUid !== ownerUid) {
+        logger.error("A public job record has an invalid owner.", { jobId, ownerUid });
+        throw new HttpsError("internal", "The processing job record is invalid.");
+      }
+      transaction.update(jobRef, {
+        displayName,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    });
+
+    return { jobId, displayName };
   },
 );
 
