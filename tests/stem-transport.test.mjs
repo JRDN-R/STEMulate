@@ -194,6 +194,37 @@ function okFetcher() {
   });
 }
 
+test("calls the default fetcher with the browser global as its receiver", async () => {
+  const originalFetch = globalThis.fetch;
+  let observedReceiver;
+
+  globalThis.fetch = async function receiverSensitiveFetch() {
+    observedReceiver = this;
+    if (this !== globalThis) {
+      throw new TypeError("Can only call Window.fetch on instances of Window");
+    }
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      arrayBuffer: async () => new ArrayBuffer(8),
+    };
+  };
+
+  try {
+    const context = new FakeAudioContext();
+    context.decodeDurations.push(30);
+    const transport = new StemTransport({ context });
+
+    await transport.load({ vocals: "/vocals.wav" });
+
+    assert.equal(observedReceiver, globalThis);
+    assert.equal(transport.getSnapshot().status, "ready");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 async function loadedTransport({
   context = new FakeAudioContext(),
   durations = [60, 60],

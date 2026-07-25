@@ -277,7 +277,10 @@ export class StemTransport {
     this.context = options.context ?? null;
     this.ownsContext = !options.context;
     this.contextFactory = options.contextFactory ?? defaultContextFactory;
-    this.fetcher = options.fetcher ?? fetch;
+    // WebKit requires Window.fetch to be called with Window as its receiver.
+    // Storing the native function directly and later calling this.fetcher(...)
+    // instead binds it to StemTransport, which Safari rejects.
+    this.fetcher = options.fetcher ?? ((input, init) => globalThis.fetch(input, init));
     this.scheduleAheadSeconds = Math.max(
       0,
       finiteOr(options.scheduleAheadSeconds ?? DEFAULT_SCHEDULE_AHEAD_SECONDS, DEFAULT_SCHEDULE_AHEAD_SECONDS),
