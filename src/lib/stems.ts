@@ -19,12 +19,14 @@ export type StemState = {
   label: string;
   shortLabel: string;
   volume: number;
+  /** Stereo position from -100 (left) through 0 (center) to 100 (right). */
+  pan: number;
   muted: boolean;
   solo: boolean;
   color: string;
 };
 
-type StemPresentation = Omit<StemState, "id" | "volume" | "muted" | "solo"> & {
+export type StemPresentation = Omit<StemState, "id" | "volume" | "pan" | "muted" | "solo"> & {
   volume: number;
 };
 
@@ -57,10 +59,15 @@ const STEM_ALIASES: ReadonlyArray<readonly [AudioStemId, readonly string[]]> = [
 
 const ORIGINAL_ALIASES = new Set(["original", "mixture", "mix", "source"]);
 
-function makeStemState(id: StemId): StemState {
+export function stemPresentationFor(id: StemId): Readonly<StemPresentation> {
+  return STEM_PRESENTATION[id];
+}
+
+export function createStemState(id: StemId): StemState {
   return {
     id,
     ...STEM_PRESENTATION[id],
+    pan: 0,
     muted: false,
     solo: false,
   };
@@ -68,7 +75,7 @@ function makeStemState(id: StemId): StemState {
 
 export function initialStemStates(): StemState[] {
   const visibleIds: readonly StemId[] = [...DEFAULT_AUDIO_STEMS, "metronome"];
-  return visibleIds.map(makeStemState);
+  return visibleIds.map(createStemState);
 }
 
 export function isAudioStemId(id: StemId): id is AudioStemId {
@@ -89,7 +96,7 @@ export function stemStatesFor(
     ? [...available, "metronome"]
     : [...DEFAULT_AUDIO_STEMS, "metronome"];
   const previousById = new Map(previous.map((stem) => [stem.id, stem]));
-  return visibleIds.map((id) => previousById.get(id) ?? makeStemState(id));
+  return visibleIds.map((id) => previousById.get(id) ?? createStemState(id));
 }
 
 function normalizedTokens(value: string): string[] {

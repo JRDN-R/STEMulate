@@ -3,7 +3,9 @@ import AudioLines from "lucide-react/dist/esm/icons/audio-lines.mjs";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down.mjs";
 import CircleHelp from "lucide-react/dist/esm/icons/circle-help.mjs";
 import Cloud from "lucide-react/dist/esm/icons/cloud.mjs";
+import Download from "lucide-react/dist/esm/icons/download.mjs";
 import Drum from "lucide-react/dist/esm/icons/drum.mjs";
+import FolderArchive from "lucide-react/dist/esm/icons/folder-archive.mjs";
 import Gauge from "lucide-react/dist/esm/icons/gauge.mjs";
 import Guitar from "lucide-react/dist/esm/icons/guitar.mjs";
 import Headphones from "lucide-react/dist/esm/icons/headphones.mjs";
@@ -11,7 +13,6 @@ import Import from "lucide-react/dist/esm/icons/import.mjs";
 import KeyboardMusic from "lucide-react/dist/esm/icons/keyboard-music.mjs";
 import Library from "lucide-react/dist/esm/icons/library.mjs";
 import Link2 from "lucide-react/dist/esm/icons/link-2.mjs";
-import ListMusic from "lucide-react/dist/esm/icons/list-music.mjs";
 import Menu from "lucide-react/dist/esm/icons/menu.mjs";
 import Mic2 from "lucide-react/dist/esm/icons/mic-2.mjs";
 import Minus from "lucide-react/dist/esm/icons/minus.mjs";
@@ -42,16 +43,30 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
+import LibraryView from "./LibraryView";
+import StemSelectionPicker from "./components/StemSelectionPicker";
 import {
   backendConfigured,
   spotifyImportEnabled,
 } from "./lib/backendConfig";
+import {
+  createPanController,
+  isStemAudible,
+  StemAudioGraph,
+} from "./lib/audioMixer";
 import { validateRemoteImportUrl } from "./lib/remoteSources";
 import {
   initialStemStates,
   isAudioStemId,
-  stemStatesFor,
 } from "./lib/stems";
+import {
+  loadStemSelection,
+  saveStemSelection,
+  selectStemSources,
+  stemStatesForSelection,
+  type StemSelection,
+} from "./lib/stemSelection";
+import type { SongLibraryItem } from "./lib/songLibrary";
 import type {
   AnalysisData,
   AudioStemId,
@@ -266,15 +281,20 @@ function StemRow({
   stem,
   available,
   onVolume,
+  onPan,
   onToggleMute,
   onToggleSolo,
 }: {
   stem: StemState;
   available: boolean;
   onVolume: (value: number) => void;
+  onPan: (value: number) => void;
   onToggleMute: () => void;
   onToggleSolo: () => void;
 }) {
+  const panLabel = stem.pan === 0
+    ? "C"
+    : `${Math.abs(stem.pan)}${stem.pan < 0 ? "L" : "R"}`;
   return (
     <div className={`stem-row ${stem.muted ? "is-muted" : ""}`} style={{ "--stem-color": stem.color } as React.CSSProperties}>
       <div className="stem-identity">
@@ -301,7 +321,21 @@ function StemRow({
       <div className="stem-actions">
         <button type="button" className={`mini-button ${stem.muted ? "active" : ""}`} aria-label={`${stem.muted ? "Unmute" : "Mute"} ${stem.label}`} aria-pressed={stem.muted} onClick={onToggleMute}>M</button>
         <button type="button" className={`mini-button solo ${stem.solo ? "active" : ""}`} aria-label={`${stem.solo ? "Unsolo" : "Solo"} ${stem.label}`} aria-pressed={stem.solo} onClick={onToggleSolo}>S</button>
-        <output aria-live="off">{stem.volume}</output>
+        <label className="pan-control">
+          <span>PAN</span>
+          <input
+            type="range"
+            min="-100"
+            max="100"
+            step="1"
+            value={stem.pan}
+            onChange={(event) => onPan(Number(event.target.value))}
+            aria-label={`${stem.label} stereo pan`}
+            aria-valuetext={stem.pan === 0 ? "Center" : `${Math.abs(stem.pan)} percent ${stem.pan < 0 ? "left" : "right"}`}
+          />
+          <output aria-live="off">{panLabel}</output>
+        </label>
+        <output className="volume-readout" aria-live="off">{stem.volume}%</output>
       </div>
     </div>
   );
@@ -506,8 +540,9 @@ export default function App() {
   const [processingMode, setProcessingMode] = useState<ProcessingMode>("file");
   const [importOpen, setImportOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [libraryOpen, setLibraryOpen] = useState(false);
-  const [activeView, setActiveView] = useState<"mixer" | "practice">("mixer");
+  const [activeView, setActiveView] = useState<"library" | "mixer" | "practice">("library");
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [stemSelection, setStemSelection] = useState<StemSelection>(() => loadStemSelection());
   const [playbackRate, setPlaybackRate] = useState(1);
   const [pitch, setPitch] = useState(0);
   const [loopEnabled, setLoopEnabled] = useState(false);
@@ -520,7 +555,10 @@ export default function App() {
   const [countdownBeat, setCountdownBeat] = useState<number | null>(null);
   const [beatPulse, setBeatPulse] = useState(0);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userUid, setUserUid] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [exportBusy, setExportBusy] = useState<"mix" | "stems" | null>(null);
+  const [exportProgress, setExportProgress] = useState("");
   const [remoteResumeTrigger, setRemoteResumeTrigger] = useState(0);
   const [remoteRecoveryPending, setRemoteRecoveryPending] = useState(false);
 
@@ -531,6 +569,7 @@ export default function App() {
   const remoteResumeFailures = useRef(0);
   const loopRef = useRef({ enabled: loopEnabled, start: loopStart, end: loopEnd });
   const audioContext = useRef<AudioContext | null>(null);
+  const audioGraph = useRef(new StemAudioGraph());
   const lastBeatIndex = useRef(-1);
   const countInToken = useRef(0);
   const countInActive = useRef(false);
@@ -538,8 +577,6 @@ export default function App() {
   const appShellRef = useRef<HTMLElement>(null);
   const controlDockRef = useRef<HTMLDivElement>(null);
   const bottomNavRef = useRef<HTMLElement>(null);
-  const libraryButtonRef = useRef<HTMLButtonElement>(null);
-  const libraryPopoverRef = useRef<HTMLDivElement>(null);
 
   const hasAudioSources = Object.values(audioSources).some(Boolean);
   const clickGrid = useMemo(
@@ -555,13 +592,11 @@ export default function App() {
   const modalOpen = importOpen || settingsOpen;
 
   const openImport = useCallback(() => {
-    setLibraryOpen(false);
     setImportOpen(true);
   }, []);
 
   const closeImport = useCallback(() => setImportOpen(false), []);
   const openSettings = useCallback(() => {
-    setLibraryOpen(false);
     setSettingsOpen(true);
   }, []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
@@ -609,7 +644,12 @@ export default function App() {
     let cancelled = false;
     let unsubscribe: (() => void) | undefined;
     void import("./lib/firebase").then(({ observeUser }) => {
-      if (!cancelled) unsubscribe = observeUser((user) => setUserEmail(user?.email || null));
+      if (!cancelled) {
+        unsubscribe = observeUser((user) => {
+          setUserEmail(user?.email || null);
+          setUserUid(user?.uid || null);
+        });
+      }
     });
     return () => {
       cancelled = true;
@@ -627,33 +667,11 @@ export default function App() {
 
   useEffect(() => {
     if (!modalOpen) return;
-    const background = [appShellRef.current, controlDockRef.current, bottomNavRef.current, libraryPopoverRef.current]
+    const background = [appShellRef.current, controlDockRef.current, bottomNavRef.current]
       .filter((element): element is HTMLElement => Boolean(element));
     background.forEach((element) => { element.inert = true; });
     return () => background.forEach((element) => { element.inert = false; });
   }, [modalOpen]);
-
-  useEffect(() => {
-    if (!libraryOpen) return;
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (libraryPopoverRef.current?.contains(target) || libraryButtonRef.current?.contains(target)) return;
-      setLibraryOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setLibraryOpen(false);
-      libraryButtonRef.current?.focus();
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [libraryOpen]);
 
   useEffect(() => {
     loopRef.current = { enabled: loopEnabled, start: loopStart, end: loopEnd };
@@ -665,6 +683,7 @@ export default function App() {
     setIsCountingIn(false);
     setCountdownBeat(null);
     const existing = audioElements.current;
+    audioGraph.current.disconnect();
     Object.values(existing).forEach((audio) => {
       if (!audio) return;
       audio.pause();
@@ -674,9 +693,11 @@ export default function App() {
     const next: Partial<Record<AudioStemId, HTMLAudioElement>> = {};
     const entries = Object.entries(audioSources).filter((entry): entry is [AudioStemId, string] => Boolean(entry[1]));
     entries.forEach(([id, src]) => {
-      const audio = new Audio(src);
+      const audio = new Audio();
+      audio.crossOrigin = "anonymous";
       audio.preload = "metadata";
       audio.setAttribute("playsinline", "");
+      audio.src = src;
       next[id] = audio;
     });
     audioElements.current = next;
@@ -700,24 +721,37 @@ export default function App() {
       });
       clock.addEventListener("ended", () => setIsPlaying(false));
     }
-    return () => Object.values(next).forEach((audio) => {
-      if (!audio) return;
-      audio.pause();
-      audio.muted = false;
-      audio.loop = false;
-    });
+    return () => {
+      audioGraph.current.disconnect();
+      Object.values(next).forEach((audio) => {
+        if (!audio) return;
+        audio.pause();
+        audio.muted = false;
+        audio.loop = false;
+      });
+    };
   }, [audioSources]);
 
   useEffect(() => {
-    const anySolo = stems.some((stem) => stem.solo);
-    Object.entries(audioElements.current).forEach(([id, audio]) => {
-      const stem = stems.find((item) => item.id === id);
-      if (!audio || !stem) return;
-      const silenced = stem.muted || (anySolo && !stem.solo);
-      audio.volume = silenced ? 0 : Math.min(1, stem.volume / 100);
+    const context = audioContext.current;
+    if (context) {
+      audioGraph.current.connect(context, audioElements.current);
+      audioGraph.current.update(stems, playbackRate);
+      return;
+    }
+    Object.values(audioElements.current).forEach((audio) => {
+      if (!audio) return;
+      audio.volume = 1;
       audio.playbackRate = playbackRate;
     });
   }, [stems, playbackRate, audioSources]);
+
+  useEffect(() => () => {
+    audioGraph.current.disconnect();
+    const context = audioContext.current;
+    audioContext.current = null;
+    if (context && context.state !== "closed") void context.close();
+  }, []);
 
   useEffect(() => {
     if (!isPlaying || hasAudioSources) return;
@@ -764,12 +798,16 @@ export default function App() {
     if (!context) return;
     const oscillator = context.createOscillator();
     const gain = context.createGain();
+    const pan = createPanController(context);
     const clickStem = stems.find((stem) => stem.id === "metronome");
-    const level = clickStem?.muted ? 0 : ((clickStem?.volume || 60) / 100) * 0.18;
+    const level = clickStem && isStemAudible(clickStem, stems)
+      ? (clickStem.volume / 100) * 0.18
+      : 0;
     oscillator.frequency.value = accent ? 1320 : 880;
     gain.gain.setValueAtTime(level, context.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.055);
-    oscillator.connect(gain).connect(context.destination);
+    pan.set((clickStem?.pan ?? 0) / 100, context);
+    oscillator.connect(gain).connect(pan.node).connect(context.destination);
     oscillator.start();
     oscillator.stop(context.currentTime + 0.06);
   }, [metronomeEnabled, stems]);
@@ -833,6 +871,8 @@ export default function App() {
     }
 
     if (!audioContext.current) audioContext.current = new AudioContext();
+    audioGraph.current.connect(audioContext.current, audioElements.current);
+    audioGraph.current.update(stems, playbackRate);
     const resumeAudioContext = audioContext.current.state === "suspended"
       ? audioContext.current.resume()
       : Promise.resolve();
@@ -906,6 +946,50 @@ export default function App() {
     setStems((current) => current.map((stem) => stem.id === id ? { ...stem, ...patch } : stem));
   };
 
+  const updateStemSelection = (next: StemSelection) => {
+    const saved = saveStemSelection(next);
+    setStemSelection(saved);
+    setAudioSources(selectStemSources(analysis.stems, saved));
+    setStems((current) => stemStatesForSelection(analysis.stems, saved, current));
+  };
+
+  const exportAudio = async (kind: "mix" | "stems") => {
+    if (!availableStemCount || exportBusy) {
+      if (!availableStemCount) setToast("Finish processing a track before exporting audio.");
+      return;
+    }
+    setExportBusy(kind);
+    setExportProgress(kind === "mix" ? "Preparing stereo mix" : "Preparing stem archive");
+    try {
+      const {
+        packageStemsZip,
+        renderMixWav,
+        safeFileBase,
+        shareOrDownload,
+      } = await import("./lib/audioExport");
+      const baseName = safeFileBase(trackTitle);
+      const blob = kind === "mix"
+        ? await renderMixWav(audioSources, stems, setExportProgress)
+        : await packageStemsZip(analysis.stems, trackTitle, setExportProgress);
+      setExportProgress("Opening export");
+      const disposition = await shareOrDownload(
+        blob,
+        kind === "mix" ? `${baseName}-mix.wav` : `${baseName}-stems.zip`,
+        kind === "mix" ? `${trackTitle} mix` : `${trackTitle} stems`,
+      );
+      setToast(disposition === "cancelled"
+        ? "Export cancelled."
+        : disposition === "shared"
+          ? `${kind === "mix" ? "Mix" : "Stem archive"} shared.`
+          : `${kind === "mix" ? "Mix" : "Stem archive"} downloaded.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The audio export could not be completed.");
+    } finally {
+      setExportBusy(null);
+      setExportProgress("");
+    }
+  };
+
   const applyResult = (result: AnalysisData) => {
     setAnalysis({
       bpm: result.bpm,
@@ -916,8 +1000,32 @@ export default function App() {
       stems: result.stems,
     });
     if (Object.values(result.stems).some(Boolean)) {
-      setAudioSources(result.stems);
-      setStems((current) => stemStatesFor(result.stems, current));
+      setAudioSources(selectStemSources(result.stems, stemSelection));
+      setStems((current) => stemStatesForSelection(result.stems, stemSelection, current));
+    }
+  };
+
+  const openSavedSong = async (song: SongLibraryItem) => {
+    setToast(`Opening ${song.title}…`);
+    try {
+      const { loadProcessingJob } = await import("./lib/musicAi");
+      const result = await loadProcessingJob(song.id);
+      applyResult(result.analysis);
+      setActiveJobId(song.id);
+      setTrackTitle(result.displayName?.trim() || song.title);
+      setTrackSource(result.sourceProvider === "spotify"
+        ? "Spotify track · spotDL → YouTube Music · Music.ai"
+        : result.sourceProvider === "youtube"
+          ? "YouTube track · yt-dlp · Music.ai"
+          : "Uploaded file · Music.ai");
+      setProcessingStage("ready");
+      setProcessingDetail(`${song.title} is ready`);
+      setIsPlaying(false);
+      seek(0);
+      setActiveView("mixer");
+      window.requestAnimationFrame(() => scrollTo("mixer"));
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The saved song could not be opened.");
     }
   };
 
@@ -1039,18 +1147,20 @@ export default function App() {
     processingController.current = controller;
     setProcessingMode("file");
     setImportOpen(false);
+    if (backendConfigured) setActiveView("library");
     setTrackTitle(file.name.replace(/\.[^.]+$/, ""));
     setTrackSource(`${file.type || "audio file"} · local preview`);
     if (localObjectUrl.current) URL.revokeObjectURL(localObjectUrl.current);
     localObjectUrl.current = URL.createObjectURL(file);
     setAudioSources({ other: localObjectUrl.current });
-    setStems((current) => stemStatesFor({}, current));
+    setStems((current) => stemStatesForSelection({}, stemSelection, current));
     seek(0);
 
     try {
       if (backendConfigured) {
         const { analyzeFile } = await import("./lib/musicAi");
         applyResult(await analyzeFile(file, onStage, controller.signal));
+        setToast(`${file.name.replace(/\.[^.]+$/, "")} is ready in your library.`);
       } else await simulateAnalysis(file.name);
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -1084,6 +1194,7 @@ export default function App() {
     processingController.current = controller;
     setProcessingMode("remote");
     setImportOpen(false);
+    setActiveView("library");
     onStage("download", "Preparing the private download job");
     let musicAi: typeof import("./lib/musicAi") | null = null;
     try {
@@ -1094,6 +1205,7 @@ export default function App() {
       setTrackTitle(result.title);
       setTrackSource(result.source);
       seek(0);
+      setToast(`${result.title} is ready in your library.`);
     } catch (error) {
       if (controller.signal.aborted) return;
       const pending = Boolean(musicAi?.hasPendingRemoteTrack());
@@ -1136,12 +1248,11 @@ export default function App() {
   };
 
   const processingBusy = ["download", "upload", "analyze", "split"].includes(processingStage);
-  const stageVisible = processingStage !== "idle" && processingStage !== "ready";
 
   return (
     <div className="app-bg">
       <div className="scanlines" aria-hidden="true" />
-      <main ref={appShellRef} className="app-shell">
+      <main ref={appShellRef} className={`app-shell ${activeView === "library" ? "library-mode" : ""}`}>
         <header className="app-header">
           <img className="brand-logo" src="./stemulate-logo.png" alt="STEMulate" />
           <div className="brand-copy"><span className="eyebrow">AI PRACTICE DECK</span><strong>STEM<span>ULATE</span></strong><small>{backendConfigured ? "Music.ai engine armed" : "Interactive demo mode"}</small></div>
@@ -1157,6 +1268,15 @@ export default function App() {
           onStopRecovery={stopRemoteRecovery}
         />
 
+        {activeView === "library" ? (
+          <LibraryView
+            ownerUid={userUid}
+            activeJobId={activeJobId}
+            onImport={openImport}
+            onSelect={openSavedSong}
+          />
+        ) : (
+          <>
         <Panel className="track-panel">
           <div className="track-info">
             <span className="track-state"><span className={`status-dot ${processingBusy ? "working" : ""}`} />{processingStage === "error" ? "NEEDS ATTENTION" : processingBusy ? "PROCESSING" : "READY TO PRACTICE"}</span>
@@ -1221,6 +1341,21 @@ export default function App() {
         <div className="workspace-grid">
           <Panel className="mixer-panel" id="mixer">
             <div className="panel-title-row"><div><span className="eyebrow">STEM MIXER</span><h2>Shape the rehearsal</h2></div><span className="engine-badge"><Activity size={15} />{availableStemCount ? `${availableStemCount} stems` : "Demo levels"}</span></div>
+            <details className="stem-layout">
+              <summary>
+                <SlidersHorizontal size={17} />
+                Choose stem layout
+                <span>{stemSelection.stemIds.length} channels</span>
+              </summary>
+              <StemSelectionPicker
+                value={stemSelection}
+                onChange={updateStemSelection}
+                heading="Stem layout and order"
+              />
+              <p className="stem-layout__note">
+                Presets use the outputs supported by this Music.ai workflow. Background vocals and individual drum parts require additional matching workflows before they can appear here.
+              </p>
+            </details>
             <div className={`stem-stack ${stems.length > 6 ? "many-stems" : ""}`}>
               {stems.map((stem) => (
                 <StemRow
@@ -1228,12 +1363,39 @@ export default function App() {
                   stem={stem}
                   available={stem.id === "metronome" || (isAudioStemId(stem.id) && Boolean(analysis.stems[stem.id]))}
                   onVolume={(volume) => updateStem(stem.id, { volume })}
+                  onPan={(pan) => updateStem(stem.id, { pan })}
                   onToggleMute={() => updateStem(stem.id, { muted: !stem.muted })}
                   onToggleSolo={() => updateStem(stem.id, { solo: !stem.solo })}
                 />
               ))}
             </div>
-            {availableStemCount > 1 && <p className="engine-limit">Browser preview mix · production sample-locked playback is not enabled yet.</p>}
+            <div className="mixer-export" aria-busy={Boolean(exportBusy)}>
+              <button
+                type="button"
+                className="hardware-button"
+                disabled={!availableStemCount || Boolean(exportBusy)}
+                onClick={() => void exportAudio("mix")}
+              >
+                <Download size={18} />
+                <span><strong>Export mix</strong><small>Current levels + pan · WAV</small></span>
+              </button>
+              <button
+                type="button"
+                className="hardware-button"
+                disabled={!availableStemCount || Boolean(exportBusy)}
+                onClick={() => void exportAudio("stems")}
+              >
+                <FolderArchive size={18} />
+                <span><strong>Export stems</strong><small>Every original stem · ZIP</small></span>
+              </button>
+            </div>
+            <p className="engine-limit" aria-live="polite">
+              {exportBusy
+                ? exportProgress
+                : availableStemCount > 1
+                  ? "Web Audio gain, solo and stereo pan · mix export preserves these settings."
+                  : "Process a track to unlock functional mixing and exports."}
+            </p>
           </Panel>
 
           <Panel className="practice-panel" id="practice">
@@ -1248,9 +1410,11 @@ export default function App() {
             <div className="analysis-readout"><Gauge size={18} /><span><strong>{analysis.bpm > 0 ? `${Math.round(analysis.bpm)} BPM` : "Tempo unavailable"}</strong><small>{analysis.beats.length} beat markers · {analysis.chords.length} chord changes</small></span></div>
           </Panel>
         </div>
+          </>
+        )}
       </main>
 
-      <div ref={controlDockRef} className="control-dock" role="group" aria-label="Playback controls">
+      {activeView !== "library" && <div ref={controlDockRef} className="control-dock" role="group" aria-label="Playback controls">
         <div className="seek-row"><time>{formatTime(currentTime)}</time><input type="range" min="0" max={Math.max(1, duration)} step="0.01" value={Math.min(currentTime, duration)} onChange={(event) => seek(Number(event.target.value))} aria-label="Track position" /><time>-{formatTime(remaining)}</time></div>
         <div className="transport-row">
           <IconButton label="Toggle section loop" pressed={loopEnabled} className={loopEnabled ? "active" : ""} onClick={() => setLoopEnabled((value) => !value)}><Repeat2 size={21} /></IconButton>
@@ -1259,16 +1423,14 @@ export default function App() {
           <IconButton label="Forward 10 seconds" onClick={() => seek(currentTime + 10)}><RotateCcw className="flip" size={21} /><small>10</small></IconButton>
           <IconButton label="Open practice controls" onClick={() => scrollTo("practice")}><SlidersHorizontal size={22} /></IconButton>
         </div>
-      </div>
+      </div>}
 
       <nav ref={bottomNavRef} className="bottom-nav" aria-label="Primary navigation">
-        <button ref={libraryButtonRef} type="button" aria-expanded={libraryOpen} aria-controls="library-popover" aria-haspopup="dialog" onClick={() => setLibraryOpen((value) => !value)} className={libraryOpen ? "active" : ""}><Library size={21} /><span>Library</span></button>
-        <button type="button" className={!libraryOpen && activeView === "mixer" ? "active" : ""} aria-current={!libraryOpen && activeView === "mixer" ? "location" : undefined} onClick={() => { setLibraryOpen(false); setActiveView("mixer"); scrollTo("mixer"); }}><SlidersHorizontal size={21} /><span>Mixer</span></button>
-        <button type="button" className={!libraryOpen && activeView === "practice" ? "active" : ""} aria-current={!libraryOpen && activeView === "practice" ? "location" : undefined} onClick={() => { setLibraryOpen(false); setActiveView("practice"); scrollTo("practice"); }}><Headphones size={21} /><span>Practice</span></button>
+        <button type="button" className={activeView === "library" ? "active" : ""} aria-current={activeView === "library" ? "page" : undefined} onClick={() => { setActiveView("library"); window.scrollTo({ top: 0, behavior: preferredScrollBehavior() }); }}><Library size={21} /><span>Library</span></button>
+        <button type="button" className={activeView === "mixer" ? "active" : ""} aria-current={activeView === "mixer" ? "page" : undefined} onClick={() => { setActiveView("mixer"); window.requestAnimationFrame(() => scrollTo("mixer")); }}><SlidersHorizontal size={21} /><span>Mixer</span></button>
+        <button type="button" className={activeView === "practice" ? "active" : ""} aria-current={activeView === "practice" ? "page" : undefined} onClick={() => { setActiveView("practice"); window.requestAnimationFrame(() => scrollTo("practice")); }}><Headphones size={21} /><span>Practice</span></button>
         <button type="button" className={importOpen ? "active" : ""} aria-haspopup="dialog" aria-expanded={importOpen} onClick={openImport}><Import size={21} /><span>Import</span></button>
       </nav>
-
-      {libraryOpen && <div id="library-popover" ref={libraryPopoverRef} className="library-popover hardware-panel" role="dialog" aria-label="Track library"><div><span className="eyebrow">YOUR LIBRARY</span><strong>Recent project</strong></div><button type="button" onClick={() => { seek(0); setLibraryOpen(false); setActiveView("mixer"); scrollTo("mixer"); }}><span className="mini-cover"><ListMusic size={20} /></span><span><strong>{trackTitle}</strong><small>{activeSection?.label || "Ready"} · {formatTime(duration)}</small></span><Play size={17} /></button><button type="button" className="new-project" onClick={openImport}><Plus size={17} /> New project</button></div>}
 
       <ImportModal
         open={importOpen}
