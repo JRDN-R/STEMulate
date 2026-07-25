@@ -29,6 +29,7 @@ import {
   REGION,
   REMOTE_IMPORT_DAILY_LIMIT,
   REMOTE_IMPORT_MAX_BYTES,
+  STORAGE_TRIGGER_REGION,
 } from "./config";
 import { downloaderConfig, enqueueDownloadTask } from "./download-tasks";
 import {
@@ -689,6 +690,7 @@ export const getProcessingOutputs = onCall<GetOutputsInput>(
 
 export const queueUploadedSource = onObjectFinalized(
   {
+    region: STORAGE_TRIGGER_REGION,
     retry: true,
     timeoutSeconds: 120,
     memory: "256MiB",
