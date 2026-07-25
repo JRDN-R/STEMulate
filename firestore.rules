@@ -1,0 +1,22 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(userId) {
+      return request.auth != null
+        && request.auth.uid == userId
+        && request.auth.token.owner == true;
+    }
+
+    // The client may observe its own job state, but only trusted Functions write it.
+    match /users/{userId}/jobs/{jobId} {
+      allow get, list: if isOwner(userId);
+      allow create, update, delete: if false;
+    }
+
+    // Includes internalJobs, which contains signed source URLs and Music.ai IDs.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

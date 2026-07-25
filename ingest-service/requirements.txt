@@ -1,0 +1,8 @@
+Flask==3.1.2
+google-cloud-firestore==2.21.0
+gunicorn==23.0.0
+requests==2.34.2
+spotdl==4.5.2
+# Do not add yt-dlp's `pin` extra: it pins websockets 16 while spotDL 4.5.2
+# requires websockets 14.x. The yt-dlp package itself remains exactly pinned.
+yt-dlp[default,deno]==2026.7.4

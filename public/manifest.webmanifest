@@ -1,0 +1,26 @@
+{
+  "name": "STEMulate — AI Practice Deck",
+  "short_name": "STEMulate",
+  "description": "Split stems, follow chords, loop sections, and practice against an analyzed beat map.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#050707",
+  "theme_color": "#050707",
+  "icons": [
+    {
+      "src": "./icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
