@@ -1,0 +1,14 @@
+[
+  {
+    "origin": [
+      "https://jrdn-r.github.io",
+      "https://stem-ulate.web.app",
+      "https://stem-ulate.firebaseapp.com",
+      "http://localhost:5173",
+      "http://127.0.0.1:5173"
+    ],
+    "method": ["GET", "HEAD"],
+    "responseHeader": ["Content-Type", "Content-Length", "Accept-Ranges"],
+    "maxAgeSeconds": 3600
+  }
+]

@@ -1,0 +1,43 @@
+name: Deploy STEMulate to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    env:
+      # These are public browser settings, not API secrets.
+      VITE_STEMULATE_BACKEND_ENABLED: "true"
+      VITE_ENABLE_SPOTIFY_IMPORT: ${{ vars.VITE_ENABLE_SPOTIFY_IMPORT || 'false' }}
+      VITE_FIREBASE_APP_CHECK_SITE_KEY: "6LckD2AtAAAAAJFC21T_1N5F8ms8xCC-ponPCPdv"
+      VITE_FIREBASE_FUNCTIONS_REGION: us-central1
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
