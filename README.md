@@ -143,3 +143,7 @@ Open the published URL in Safari, tap **Share**, choose **Add to Home Screen**,
 and leave **Open as Web App** enabled. Selected stems are prepared on one shared
 audio clock; the first Play tap unlocks Web Audio and waits for that preparation
 to finish before playback starts.
+
+For smoother native playback with stems cached on the phone, the repository now
+also includes a native SwiftUI/AVAudioEngine app and repeatable device-install
+scripts. See [`ios/README.md`](ios/README.md).

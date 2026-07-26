@@ -1,0 +1,14 @@
+// Safe defaults. Local.xcconfig overrides these values and is intentionally ignored.
+DEVELOPMENT_TEAM =
+PRODUCT_BUNDLE_IDENTIFIER = io.github.jrdn-r.STEMulate
+TEST_PRODUCT_BUNDLE_IDENTIFIER = io.github.jrdn-r.STEMulate.tests
+MARKETING_VERSION = 1.0
+CURRENT_PROJECT_VERSION = 1
+GOOGLE_REVERSED_CLIENT_ID = com.googleusercontent.apps.REPLACE_ME
+
+CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED = YES
+ENABLE_STRICT_OBJC_MSGSEND = YES
+SWIFT_STRICT_CONCURRENCY = targeted
+
+#include? "Local.xcconfig"
+#include? "Firebase.xcconfig"

@@ -1,0 +1,59 @@
+name: Build STEMulate for iOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        working-directory: ios
+        run: xcodegen generate --spec project.yml
+      - name: Run app tests
+        working-directory: ios
+        run: |
+          DEVICE_ID="$(
+            xcrun simctl list devices available |
+              awk '
+                /^[[:space:]]+iPhone/ &&
+                match($0, /\([0-9A-F-][0-9A-F-]*\)/) {
+                  print substr($0, RSTART + 1, RLENGTH - 2)
+                  exit
+                }
+              '
+          )"
+          if [ -z "${DEVICE_ID}" ]; then
+            echo "No available iPhone simulator was found." >&2
+            exit 1
+          fi
+          xcodebuild \
+            -project STEMulate.xcodeproj \
+            -scheme STEMulate \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${DEVICE_ID}" \
+            -derivedDataPath DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            test

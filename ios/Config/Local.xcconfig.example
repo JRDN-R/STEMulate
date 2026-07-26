@@ -1,0 +1,7 @@
+// Copy this file to Local.xcconfig or run scripts/configure.sh.
+// Team IDs are normally ten uppercase letters/numbers.
+DEVELOPMENT_TEAM = ABCDE12345
+PRODUCT_BUNDLE_IDENTIFIER = com.yourname.STEMulate
+TEST_PRODUCT_BUNDLE_IDENTIFIER = com.yourname.STEMulate.tests
+MARKETING_VERSION = 1.0
+CURRENT_PROJECT_VERSION = 1

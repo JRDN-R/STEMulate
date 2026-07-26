@@ -1,0 +1,111 @@
+name: STEMulate
+
+options:
+  bundleIdPrefix: io.github.jrdn-r
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+
+configs:
+  Debug: debug
+  Release: release
+
+packages:
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk.git
+    from: 11.0.0
+  GoogleSignIn:
+    url: https://github.com/google/GoogleSignIn-iOS.git
+    from: 8.0.0
+
+settings:
+  base:
+    # Firebase and GoogleSignIn still expose several callback types without
+    # complete Sendable annotations. Swift 5 language mode keeps those SDK
+    # boundaries as warnings while retaining modern async/actor support.
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  STEMulate:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: STEMulate/Sources
+    resources:
+      - path: STEMulate/Resources
+        excludes:
+          - GoogleService-Info.plist.example
+          - Info.plist
+          - STEMulate.Release.entitlements
+    configFiles:
+      Debug: Config/Debug.xcconfig
+      Release: Config/Release.xcconfig
+    settings:
+      base:
+        INFOPLIST_FILE: STEMulate/Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+      configs:
+        Release:
+          CODE_SIGN_ENTITLEMENTS: STEMulate/Resources/STEMulate.Release.entitlements
+    dependencies:
+      - package: Firebase
+        product: FirebaseAuth
+      - package: Firebase
+        product: FirebaseAppCheck
+      - package: Firebase
+        product: FirebaseCore
+      - package: Firebase
+        product: FirebaseFirestore
+      - package: Firebase
+        product: FirebaseFunctions
+      - package: Firebase
+        product: FirebaseStorage
+      - package: GoogleSignIn
+        product: GoogleSignIn
+      - package: GoogleSignIn
+        product: GoogleSignInSwift
+
+  STEMulateTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: STEMulateTests
+    configFiles:
+      Debug: Config/Debug.xcconfig
+      Release: Config/Release.xcconfig
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: "$(TEST_PRODUCT_BUNDLE_IDENTIFIER)"
+    dependencies:
+      - target: STEMulate
+
+schemes:
+  STEMulate:
+    build:
+      targets:
+        STEMulate: all
+        STEMulateTests:
+          - test
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: true
+      targets:
+        - name: STEMulateTests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
