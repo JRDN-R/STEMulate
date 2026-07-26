@@ -22,7 +22,10 @@ import {
   normalizeChords,
   normalizeSections,
 } from "./musicAnalysis";
-import { validateRemoteImportUrl } from "./remoteSources";
+import {
+  remoteImportValidationMessage,
+  validateRemoteImportUrl,
+} from "./remoteSources";
 import {
   validateStemPreviewManifest,
   type StemPreviewManifest,
@@ -767,11 +770,7 @@ export async function analyzeRemoteTrack(
   const normalizedUrl = url.trim();
   const validation = validateRemoteImportUrl(normalizedUrl, spotifyImportEnabled);
   if (!validation.ok) {
-    throw new Error(validation.reason === "spotify-disabled"
-      ? "Spotify importing is disabled on this deployment. Use a YouTube video URL."
-      : spotifyImportEnabled
-        ? "Enter a valid YouTube or Spotify track URL."
-        : "Enter a valid YouTube video URL.");
+    throw new Error(remoteImportValidationMessage(validation, spotifyImportEnabled));
   }
   let active = recalledRemoteJob();
   if (active && active.ownerUid !== owner.uid) {

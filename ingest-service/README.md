@@ -59,8 +59,16 @@ already changed the internal status.
 
 ## Media processing policy
 
-- YouTube URLs run through `yt-dlp` with playlists, cookies, configuration,
-  plugins, remote components, caches, and interactive input disabled.
+- YouTube watch links from `youtube.com`, `m.youtube.com`, and
+  `music.youtube.com`, `youtu.be` links, and Shorts links are all canonicalized
+  to one single-video URL before this service receives them. Playlists,
+  channels, searches, live videos, private/account-gated videos, and videos
+  longer than 20 minutes are rejected.
+- YouTube URLs run through pinned `yt-dlp`, EJS, Deno, curl-cffi, and the pinned
+  BgUtils PO-token plugin. User-writable plugin directories, cookies, configuration,
+  remote components, caches, and interactive input remain unavailable through
+  the isolated empty HOME/XDG directories and disabled Python user site. The
+  PO-token plugin can contact only the loopback sidecar configured below.
 - Spotify track URLs run through spotDL with one thread and YouTube Music then
   YouTube as audio providers. spotDL uses Spotify for metadata; it does not
   retrieve Spotify's audio stream.
@@ -68,7 +76,7 @@ already changed the internal status.
   `SPOTIFY_CLIENT_SECRET`. They should be credentials for your own official
   Spotify developer application and must be mounted from Secret Manager.
 - No client cookies, user credentials, proxies, playlists, albums, channels,
-  shorteners, or arbitrary URLs are accepted.
+  third-party URL shorteners, or arbitrary URLs are accepted.
 - Child processes receive isolated empty HOME/XDG/Deno directories and no
   proxy variables. Commands use fixed argument arrays with `shell=False`.
 - Tracks must be at most 20 minutes and 100 MiB. The complete worker operation
@@ -92,7 +100,12 @@ STORAGE_BUCKET=stem-ulate.firebasestorage.app
 EXPECTED_TASK_QUEUE=stemulate-downloads
 MAX_TASK_RETRY_COUNT=1
 WORK_ROOT=/work
+YOUTUBE_POT_PROVIDER_URL=http://127.0.0.1:4416
 ```
+
+`YOUTUBE_POT_PROVIDER_URL` is required for the recommended multi-container
+deployment below. The service accepts only the exact loopback URL shown, so it
+cannot be redirected to an arbitrary network service.
 
 Optional globally, but required when a Spotify job is received:
 
@@ -119,7 +132,8 @@ REGION=us-central1
 REPOSITORY=stemulate
 SERVICE=stemulate-ingest
 QUEUE=stemulate-downloads
-IMAGE_TAG=2026-07-22
+IMAGE_TAG=2026-07-25-youtube
+POT_IMAGE="docker.io/brainicism/bgutil-ytdlp-pot-provider@sha256:bea3cfda79245700d7ad90500052b4358b1c1828fdc0961929624b83933121bc"
 RUNTIME_SA_NAME=stemulate-ingest
 INVOKER_SA_NAME=stemulate-task-invoker
 RUNTIME_SA="${RUNTIME_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -235,15 +249,17 @@ lease. If a container dies after claiming a job but before clearing its lease,
 the second and final attempt can safely reclaim it. The 24-hour one-use signed
 URL remains valid across that bounded delay.
 
-Build and deploy. The single-container in-memory volume is mounted at the same
-absolute `WORK_ROOT` used by the service and is capped below the 2 GiB instance
-memory limit:
+Build and deploy. This creates one private Cloud Run service with two containers:
+the STEMulate ingress worker and a pinned BgUtils PO-token sidecar. They share
+only the instance loopback network. The in-memory work volume is mounted only
+into the ingress worker and is capped below that container's 2 GiB limit.
+`--depends-on` plus the sidecar startup probe prevents the worker from starting
+until `GET /ping` succeeds:
 
 ```sh
 gcloud builds submit ingest-service --tag "$IMAGE"
 
 gcloud run deploy "$SERVICE" \
-  --image="$IMAGE" \
   --region="$REGION" \
   --service-account="$RUNTIME_SA" \
   --no-allow-unauthenticated \
@@ -251,12 +267,22 @@ gcloud run deploy "$SERVICE" \
   --concurrency=1 \
   --max-instances=1 \
   --min-instances=0 \
+  --timeout=1500s \
+  --add-volume=name=work,type=in-memory,size-limit=512Mi \
+  --container=ingest \
+  --image="$IMAGE" \
+  --port=8080 \
+  --depends-on=pot-provider \
   --cpu=2 \
   --memory=2Gi \
-  --timeout=1500s \
-  --add-volume=mount-path=/work,type=in-memory,size-limit=512Mi \
-  --set-env-vars=STORAGE_BUCKET=stem-ulate.firebasestorage.app,EXPECTED_TASK_QUEUE=stemulate-downloads,MAX_TASK_RETRY_COUNT=1,WORK_ROOT=/work \
-  --set-secrets=SPOTIFY_CLIENT_ID=SPOTIFY_CLIENT_ID:latest,SPOTIFY_CLIENT_SECRET=SPOTIFY_CLIENT_SECRET:latest
+  --add-volume-mount=volume=work,mount-path=/work \
+  --set-env-vars=STORAGE_BUCKET=stem-ulate.firebasestorage.app,EXPECTED_TASK_QUEUE=stemulate-downloads,MAX_TASK_RETRY_COUNT=1,WORK_ROOT=/work,YOUTUBE_POT_PROVIDER_URL=http://127.0.0.1:4416 \
+  --set-secrets=SPOTIFY_CLIENT_ID=SPOTIFY_CLIENT_ID:latest,SPOTIFY_CLIENT_SECRET=SPOTIFY_CLIENT_SECRET:latest \
+  --container=pot-provider \
+  --image="$POT_IMAGE" \
+  --cpu=1 \
+  --memory=512Mi \
+  --startup-probe=httpGet.path=/ping,httpGet.port=4416,periodSeconds=1,timeoutSeconds=1,failureThreshold=30
 
 SERVICE_URL="$(gcloud run services describe "$SERVICE" \
   --region="$REGION" \

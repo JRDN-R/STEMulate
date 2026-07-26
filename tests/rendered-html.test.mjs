@@ -79,9 +79,10 @@ test("keeps deployment configuration outside the public artifact", async () => {
 });
 
 test("guards Spotify before the remote job callable when the deploy flag is off", async () => {
-  const [client, app, workflow] = await Promise.all([
+  const [client, app, remoteSources, workflow] = await Promise.all([
     readFile(new URL("src/lib/musicAi.ts", root), "utf8"),
     readFile(new URL("src/App.tsx", root), "utf8"),
+    readFile(new URL("src/lib/remoteSources.ts", root), "utf8"),
     readFile(new URL(".github/workflows/deploy-pages.yml", root), "utf8"),
   ]);
 
@@ -90,7 +91,8 @@ test("guards Spotify before the remote job callable when the deploy flag is off"
     /validateRemoteImportUrl\(normalizedUrl,\s*spotifyImportEnabled\)[\s\S]*ensureRemoteJob\(active/,
   );
   assert.match(app, /spotifyEnabled \? "YouTube \/ Spotify" : "YouTube"/);
-  assert.match(app, /Spotify importing is disabled on this deployment/);
+  assert.match(app, /remoteImportValidationMessage\(validation,\s*spotifyImportEnabled\)/);
+  assert.match(remoteSources, /Spotify importing is disabled on this deployment/);
   assert.match(workflow, /VITE_ENABLE_SPOTIFY_IMPORT:[^\n]*false/);
 });
 

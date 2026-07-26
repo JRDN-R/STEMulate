@@ -15,7 +15,11 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN python -m pip install --no-cache-dir --requirement requirements.txt
+RUN python -m pip install --no-cache-dir --requirement requirements.txt \
+    && python -m pip check \
+    && python -c "import yt_dlp_plugins.extractor.getpot_bgutil_http" \
+    && /usr/local/bin/yt-dlp --version \
+    && /usr/local/bin/deno --version
 
 COPY app.py firestore_repo.py worker.py ./
 

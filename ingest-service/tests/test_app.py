@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("STORAGE_BUCKET", "stem-ulate.firebasestorage.app")
 os.environ.setdefault("EXPECTED_TASK_QUEUE", "stemulate-downloads")
+os.environ.setdefault("YOUTUBE_POT_PROVIDER_URL", "http://127.0.0.1:4416")
 
 from app import build_default_worker, create_app  # noqa: E402
 from test_worker import BUCKET, JOB, payload_value  # noqa: E402
@@ -65,6 +66,36 @@ class AppTests(unittest.TestCase):
         with patch.dict(os.environ, {"WORK_ROOT": "relative"}, clear=False):
             with self.assertRaises(RuntimeError):
                 build_default_worker()
+
+    def test_default_worker_accepts_only_the_loopback_pot_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.dict(
+                os.environ,
+                {
+                    "WORK_ROOT": temporary,
+                    "YOUTUBE_POT_PROVIDER_URL": "http://127.0.0.1:4416",
+                },
+                clear=False,
+            ):
+                worker = build_default_worker()
+                self.assertEqual(
+                    worker.media.youtube_pot_provider_url,
+                    "http://127.0.0.1:4416",
+                )
+            with patch.dict(
+                os.environ,
+                {
+                    "WORK_ROOT": temporary,
+                    "YOUTUBE_POT_PROVIDER_URL": "https://example.com",
+                },
+                clear=False,
+            ):
+                with self.assertRaises(RuntimeError):
+                    build_default_worker()
+            with patch.dict(os.environ, {"WORK_ROOT": temporary}, clear=False):
+                del os.environ["YOUTUBE_POT_PROVIDER_URL"]
+                with self.assertRaises(RuntimeError):
+                    build_default_worker()
 
     def test_accepts_authenticated_task_shape(self) -> None:
         client, worker = self.client()

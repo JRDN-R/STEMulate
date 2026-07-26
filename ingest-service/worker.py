@@ -27,6 +27,7 @@ MAX_TRACK_SECONDS = 20 * 60
 # 20-minute source track to finish normalization and upload.
 MAX_PROCESS_SECONDS = 23 * 60
 MAX_SIGNED_URL_LENGTH = 8192
+MAX_CAPTURED_TOOL_OUTPUT_BYTES = 64 * 1024
 
 JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 OWNER_UID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -147,6 +148,7 @@ class ToolPaths:
 class ProcessResult:
     returncode: int
     stdout: bytes = b""
+    stderr: bytes = b""
 
 
 class ProcessRunner(Protocol):
@@ -158,6 +160,7 @@ class ProcessRunner(Protocol):
         env: Mapping[str, str],
         timeout_seconds: float,
         capture_stdout: bool = False,
+        capture_stderr: bool = False,
     ) -> ProcessResult: ...
 
 
@@ -172,21 +175,23 @@ class SubprocessRunner:
         env: Mapping[str, str],
         timeout_seconds: float,
         capture_stdout: bool = False,
+        capture_stderr: bool = False,
     ) -> ProcessResult:
         if not argv or not Path(argv[0]).is_absolute():
             raise IngestError("INVALID_TOOL_PATH", "The downloader is not configured correctly.")
         if timeout_seconds <= 0:
             raise IngestError("DOWNLOAD_TIMEOUT", "The track took too long to prepare.")
 
-        capture = tempfile.TemporaryFile() if capture_stdout else None
+        stdout_capture = tempfile.TemporaryFile() if capture_stdout else None
+        stderr_capture = tempfile.TemporaryFile() if capture_stderr else None
         try:
             process = subprocess.Popen(
                 list(argv),
                 cwd=cwd,
                 env=dict(env),
                 stdin=subprocess.DEVNULL,
-                stdout=capture if capture is not None else subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=stdout_capture if stdout_capture is not None else subprocess.DEVNULL,
+                stderr=stderr_capture if stderr_capture is not None else subprocess.DEVNULL,
                 shell=False,
                 start_new_session=True,
                 close_fds=True,
@@ -201,21 +206,29 @@ class SubprocessRunner:
                     retryable=True,
                 ) from error
 
-            output = b""
-            if capture is not None:
-                capture.seek(0, os.SEEK_END)
-                size = capture.tell()
-                if size > 64 * 1024:
-                    raise IngestError(
-                        "TOOL_OUTPUT_TOO_LARGE",
-                        "The downloaded media could not be validated.",
-                    )
-                capture.seek(0)
-                output = capture.read()
-            return ProcessResult(process.returncode, output)
+            return ProcessResult(
+                process.returncode,
+                self._read_capture(stdout_capture),
+                self._read_capture(stderr_capture),
+            )
         finally:
-            if capture is not None:
-                capture.close()
+            if stdout_capture is not None:
+                stdout_capture.close()
+            if stderr_capture is not None:
+                stderr_capture.close()
+
+    @staticmethod
+    def _read_capture(capture: Any) -> bytes:
+        if capture is None:
+            return b""
+        capture.seek(0, os.SEEK_END)
+        if capture.tell() > MAX_CAPTURED_TOOL_OUTPUT_BYTES:
+            raise IngestError(
+                "TOOL_OUTPUT_TOO_LARGE",
+                "The downloaded media could not be validated.",
+            )
+        capture.seek(0)
+        return capture.read()
 
     @staticmethod
     def _terminate_group(process: subprocess.Popen[Any]) -> None:
@@ -411,7 +424,154 @@ def isolated_child_environment(work_dir: Path) -> dict[str, str]:
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "NO_COLOR": "1",
+        "PYTHONNOUSERSITE": "1",
     }
+
+
+def classify_youtube_failure(stderr: bytes) -> IngestError:
+    """Map bounded yt-dlp diagnostics to safe, actionable public failures."""
+    diagnostic = stderr.decode("utf-8", errors="replace").lower()
+    transient_markers = (
+        "http error 429",
+        "too many requests",
+        "timed out",
+        "timeout",
+        "temporary failure",
+        "failed to resolve",
+        "name resolution",
+        "connection reset",
+        "connection refused",
+        "network is unreachable",
+        "remote end closed connection",
+        "http error 500",
+        "http error 502",
+        "http error 503",
+        "http error 504",
+    )
+
+    if any(
+        marker in diagnostic
+        for marker in (
+            "private video",
+            "this video is private",
+            "members-only",
+            "members only",
+            "join this channel",
+            "premium content",
+            "sign in to confirm your age",
+            "age-restricted",
+            "age restricted",
+            "login required",
+        )
+    ):
+        return IngestError(
+            "YOUTUBE_RESTRICTED",
+            "This YouTube video is private, age-restricted, members-only, or requires sign-in. Use a public video or upload the audio file.",
+        )
+
+    if any(
+        marker in diagnostic
+        for marker in (
+            "not available in your country",
+            "geo-restricted",
+            "geo restricted",
+            "geographic restriction",
+        )
+    ):
+        return IngestError(
+            "YOUTUBE_REGION_RESTRICTED",
+            "This YouTube video is not available from the downloader's region. Upload an authorized audio file instead.",
+        )
+
+    if any(
+        marker in diagnostic
+        for marker in (
+            "premieres in ",
+            "this live event will begin",
+            "is live",
+            "live videos are not supported",
+            "does not pass filter (!is_live & duration <=",
+        )
+    ):
+        return IngestError(
+            "YOUTUBE_VIDEO_UNSUPPORTED",
+            "Live videos and videos longer than 20 minutes cannot be imported. Use one public, finished video up to 20 minutes.",
+        )
+
+    if any(
+        marker in diagnostic
+        for marker in (
+            "larger than max-filesize",
+            "larger than max filesize",
+            "file is larger than",
+        )
+    ):
+        return IngestError(
+            "SOURCE_TOO_LARGE",
+            "The source track exceeds the 100 MiB limit.",
+        )
+
+    if any(
+        marker in diagnostic
+        for marker in (
+            "no supported javascript runtime",
+            "javascript runtime is not available",
+            "challenge solver is not available",
+            "yt-dlp-ejs",
+            "ejs challenge",
+        )
+    ):
+        return IngestError(
+            "YOUTUBE_RUNTIME_UNAVAILABLE",
+            "The YouTube importer needs a service update before it can process this video.",
+        )
+
+    if any(
+        marker in diagnostic
+        for marker in transient_markers
+    ):
+        return IngestError(
+            "YOUTUBE_TEMPORARILY_UNAVAILABLE",
+            "YouTube could not be reached. Try again later.",
+            retryable=True,
+        )
+
+    if any(
+        marker in diagnostic
+        for marker in (
+            "sign in to confirm you're not a bot",
+            "sign in to confirm you’re not a bot",
+            "proof of origin",
+            "po token",
+            "pot provider",
+            "http error 403",
+        )
+    ):
+        return IngestError(
+            "YOUTUBE_ACCESS_BLOCKED",
+            "YouTube blocked this server-side download. Try again later or upload an authorized audio file.",
+        )
+
+    if any(
+        marker in diagnostic
+        for marker in (
+            "video unavailable",
+            "this video is unavailable",
+            "video has been removed",
+            "account associated with this video has been terminated",
+            "requested format is not available",
+            "no video formats found",
+        )
+    ):
+        return IngestError(
+            "SOURCE_UNAVAILABLE",
+            "This YouTube video is unavailable or has no downloadable audio. Try another public video or upload the audio file.",
+        )
+
+    return IngestError(
+        "SOURCE_UNAVAILABLE",
+        "The source track is unavailable or could not be downloaded. Try another public video or upload the audio file.",
+    )
 
 
 def exactly_one_regular_file(directory: Path, max_bytes: int) -> Path:
@@ -451,11 +611,13 @@ class MediaPipeline:
         *,
         max_bytes: int = MAX_SOURCE_BYTES,
         max_track_seconds: int = MAX_TRACK_SECONDS,
+        youtube_pot_provider_url: str | None = None,
     ):
         self.runner = runner
         self.tools = tools
         self.max_bytes = max_bytes
         self.max_track_seconds = max_track_seconds
+        self.youtube_pot_provider_url = youtube_pot_provider_url
 
     def download(
         self,
@@ -473,7 +635,6 @@ class MediaPipeline:
             argv = [
                 self.tools.yt_dlp,
                 "--ignore-config",
-                "--no-plugin-dirs",
                 "--no-remote-components",
                 "--no-cookies",
                 "--no-cache-dir",
@@ -483,6 +644,8 @@ class MediaPipeline:
                 "--quiet",
                 "--no-progress",
                 "--no-warnings",
+                "--js-runtimes",
+                "deno:/usr/local/bin/deno",
                 "--socket-timeout",
                 "30",
                 "--retries",
@@ -499,6 +662,13 @@ class MediaPipeline:
                 str(download_dir / "source.%(ext)s"),
                 source.canonical_url,
             ]
+            if self.youtube_pot_provider_url:
+                argv[-1:-1] = [
+                    "--extractor-args",
+                    "youtube:player_client=default,mweb;fetch_pot=auto",
+                    "--extractor-args",
+                    f"youtubepot-bgutilhttp:base_url={self.youtube_pot_provider_url}",
+                ]
         else:
             if not spotify_client_id or not spotify_client_secret:
                 raise IngestError(
@@ -551,7 +721,7 @@ class MediaPipeline:
                 "youtube",
                 "--skip-album-art",
                 "--yt-dlp-args",
-                "--ignore-config --no-plugin-dirs --no-remote-components --no-cookies --no-cache-dir --no-playlist --abort-on-error --max-filesize 104857600 --no-progress",
+                "--ignore-config --no-remote-components --no-cookies --no-cache-dir --no-playlist --abort-on-error --max-filesize 104857600 --no-progress",
             ]
 
         result = self.runner.run(
@@ -559,8 +729,11 @@ class MediaPipeline:
             cwd=work_dir,
             env=env,
             timeout_seconds=deadline.remaining(),
+            capture_stderr=source.provider == "youtube",
         )
         if result.returncode != 0:
+            if source.provider == "youtube":
+                raise classify_youtube_failure(result.stderr)
             raise IngestError(
                 "SOURCE_UNAVAILABLE",
                 "The source track is unavailable or could not be matched.",

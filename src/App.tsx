@@ -53,7 +53,10 @@ import {
   createPanController,
   isStemAudible,
 } from "./lib/audioMixer";
-import { validateRemoteImportUrl } from "./lib/remoteSources";
+import {
+  remoteImportValidationMessage,
+  validateRemoteImportUrl,
+} from "./lib/remoteSources";
 import {
   StemTransport,
   type StemLoadProgress,
@@ -537,7 +540,7 @@ function ImportModal({
         ) : (
           <form id="import-link-panel" role="tabpanel" aria-labelledby="import-link-tab" className="link-form" onSubmit={(event) => { event.preventDefault(); if (remoteReady && rightsConfirmed && url.trim()) onUrl(url.trim()); }}>
             <label><span>{spotifyEnabled ? "YouTube or Spotify track URL" : "YouTube video URL"}</span><input type="url" inputMode="url" autoComplete="url" placeholder="https://www.youtube.com/watch?v=…" value={url} onChange={(event) => setUrl(event.target.value)} disabled={busy || !remoteReady} required /></label>
-            <p className="form-note">{spotifyEnabled ? "Paste one YouTube video or one Spotify track. Playlists, albums, channels, searches, and shortened Spotify links are not supported." : "Paste one YouTube video. Playlists, channels, searches, and unrelated links are not supported."}</p>
+            <p className="form-note">{spotifyEnabled ? "Supported YouTube links: youtube.com, youtu.be, music.youtube.com, mobile links, and Shorts. Or paste one open.spotify.com track. Playlists, albums, channels, and searches are not supported." : "Supported: youtube.com, youtu.be, music.youtube.com, mobile links, and Shorts for one public, non-live video. Playlists, channels, and searches are not supported."}</p>
             <p className="form-note">Use only a single recording you created, own, or are authorized by both the rights holder and source service to download and send to Music.ai. Personal use alone does not grant those rights.</p>
             {spotifyEnabled && <p className="form-note">spotDL uses Spotify metadata to find audio on YouTube/YouTube Music; it does not export Spotify audio.</p>}
             {!remoteReady && remoteUnavailableReason && <p className="form-note" role="status">{remoteUnavailableReason}</p>}
@@ -1653,11 +1656,7 @@ export default function App() {
     }
     const validation = validateRemoteImportUrl(url, spotifyImportEnabled);
     if (!validation.ok) {
-      setToast(validation.reason === "spotify-disabled"
-        ? "Spotify importing is disabled on this deployment. Paste a YouTube video URL."
-        : spotifyImportEnabled
-          ? "Enter a valid YouTube or Spotify track URL."
-          : "Enter a valid YouTube video URL.");
+      setToast(remoteImportValidationMessage(validation, spotifyImportEnabled));
       return;
     }
     resetRemoteResume();

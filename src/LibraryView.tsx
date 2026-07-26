@@ -250,11 +250,20 @@ export default function LibraryView({
                     <span className="song-library__status-label">{statusLabel(song)}</span>
                     <button
                       type="button"
-                      disabled={!song.canOpen}
-                      onClick={() => void onSelect(song)}
-                      aria-label={song.canOpen ? `Open ${song.title}` : `${song.title} is not ready`}
+                      disabled={!song.canOpen && song.status !== "failed"}
+                      onClick={() => {
+                        if (song.status === "failed") onImport();
+                        else void onSelect(song);
+                      }}
+                      aria-label={
+                        song.canOpen
+                          ? `Open ${song.title}`
+                          : song.status === "failed"
+                            ? `Try another import for ${song.title}`
+                            : `${song.title} is not ready`
+                      }
                     >
-                      {song.canOpen ? "Open" : "Working"}
+                      {song.canOpen ? "Open" : song.status === "failed" ? "Try another" : "Working"}
                     </button>
                   </div>
                 )}

@@ -25,6 +25,7 @@ from worker import (
     ToolPaths,
     WorkerResult,
     canonicalize_source_url,
+    classify_youtube_failure,
     exactly_one_regular_file,
     isolated_child_environment,
     validate_task_payload,
@@ -190,8 +191,9 @@ class RecordingRunner:
         env: Mapping[str, str],
         timeout_seconds: float,
         capture_stdout: bool = False,
+        capture_stderr: bool = False,
     ) -> ProcessResult:
-        del timeout_seconds, capture_stdout
+        del timeout_seconds, capture_stdout, capture_stderr
         self.calls.append((list(argv), dict(env)))
         if argv[0].endswith("yt-dlp"):
             destination = Path(argv[argv.index("--output") + 1].replace("%(ext)s", "webm"))
@@ -223,7 +225,6 @@ class MediaCommandTests(unittest.TestCase):
         self.assertEqual(argv[0], "/usr/local/bin/yt-dlp")
         for option in (
             "--ignore-config",
-            "--no-plugin-dirs",
             "--no-remote-components",
             "--no-cookies",
             "--no-playlist",
@@ -231,8 +232,80 @@ class MediaCommandTests(unittest.TestCase):
         ):
             self.assertIn(option, argv)
         self.assertNotIn("--max-downloads", argv)
+        self.assertNotIn("--no-plugin-dirs", argv)
         self.assertNotIn("HTTPS_PROXY", env)
+        self.assertEqual(env["PYTHONNOUSERSITE"], "1")
         self.assertEqual(result.name, "source.webm")
+
+    def test_ytdlp_uses_configured_pot_provider_and_mweb_fallback(self) -> None:
+        from worker import Deadline
+
+        runner = RecordingRunner()
+        pipeline = MediaPipeline(
+            runner,
+            ToolPaths(),
+            youtube_pot_provider_url="http://127.0.0.1:4416",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            pipeline.download(
+                Source("youtube", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+                Path(temporary),
+                Deadline(10),
+                None,
+                None,
+            )
+        argv, _ = runner.calls[0]
+        extractor_args = [
+            argv[index + 1]
+            for index, value in enumerate(argv)
+            if value == "--extractor-args"
+        ]
+        self.assertIn("youtube:player_client=default,mweb;fetch_pot=auto", extractor_args)
+        self.assertIn(
+            "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
+            extractor_args,
+        )
+        self.assertEqual(
+            argv[argv.index("--js-runtimes") + 1],
+            "deno:/usr/local/bin/deno",
+        )
+
+    def test_ytdlp_failure_uses_bounded_stderr_classification(self) -> None:
+        from worker import Deadline
+
+        class FailingRunner:
+            captured_stderr = False
+
+            def run(
+                self,
+                argv: Sequence[str],
+                *,
+                cwd: Path,
+                env: Mapping[str, str],
+                timeout_seconds: float,
+                capture_stdout: bool = False,
+                capture_stderr: bool = False,
+            ) -> ProcessResult:
+                del argv, cwd, env, timeout_seconds, capture_stdout
+                self.captured_stderr = capture_stderr
+                return ProcessResult(
+                    1,
+                    stderr=b"ERROR: [youtube] Sign in to confirm you're not a bot",
+                )
+
+        runner = FailingRunner()
+        pipeline = MediaPipeline(runner, ToolPaths())
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(IngestError) as raised:
+            pipeline.download(
+                Source("youtube", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+                Path(temporary),
+                Deadline(10),
+                None,
+                None,
+            )
+        self.assertTrue(runner.captured_stderr)
+        self.assertEqual(raised.exception.code, "YOUTUBE_ACCESS_BLOCKED")
+        self.assertFalse(raised.exception.retryable)
 
     def test_spotify_requires_official_credentials(self) -> None:
         from worker import Deadline
@@ -267,6 +340,7 @@ class MediaCommandTests(unittest.TestCase):
         self.assertIn("--yt-dlp-args", argv)
         nested_ytdlp_args = argv[argv.index("--yt-dlp-args") + 1]
         self.assertNotIn("--max-downloads", nested_ytdlp_args)
+        self.assertNotIn("--no-plugin-dirs", nested_ytdlp_args)
         self.assertEqual(
             runner.spotdl_config_path,
             Path(env["HOME"]) / ".config" / "spotdl" / "config.json",
@@ -286,6 +360,50 @@ class MediaCommandTests(unittest.TestCase):
                 timeout_seconds=0.05,
             )
         self.assertEqual(raised.exception.code, "DOWNLOAD_TIMEOUT")
+
+
+class YoutubeFailureTests(unittest.TestCase):
+    def test_bot_checks_fail_immediately_with_actionable_message(self) -> None:
+        error = classify_youtube_failure(
+            b"ERROR: [youtube] Sign in to confirm you're not a bot"
+        )
+        self.assertEqual(error.code, "YOUTUBE_ACCESS_BLOCKED")
+        self.assertFalse(error.retryable)
+        self.assertIn("upload", error.public_message.lower())
+
+    def test_terminal_video_restrictions_do_not_retry(self) -> None:
+        restricted = classify_youtube_failure(
+            b"ERROR: [youtube] This video is private"
+        )
+        unavailable = classify_youtube_failure(
+            b"ERROR: [youtube] Video unavailable"
+        )
+        self.assertEqual(restricted.code, "YOUTUBE_RESTRICTED")
+        self.assertFalse(restricted.retryable)
+        self.assertEqual(unavailable.code, "SOURCE_UNAVAILABLE")
+        self.assertFalse(unavailable.retryable)
+
+    def test_transient_network_failure_retries_once(self) -> None:
+        error = classify_youtube_failure(
+            b"ERROR: Unable to download API page: HTTP Error 503"
+        )
+        self.assertEqual(error.code, "YOUTUBE_TEMPORARILY_UNAVAILABLE")
+        self.assertTrue(error.retryable)
+        self.assertNotIn("will retry", error.public_message.lower())
+
+    def test_dns_resolution_failure_retries_once(self) -> None:
+        error = classify_youtube_failure(
+            b"ERROR: [youtube] Failed to resolve 'www.youtube.com'"
+        )
+        self.assertEqual(error.code, "YOUTUBE_TEMPORARILY_UNAVAILABLE")
+        self.assertTrue(error.retryable)
+
+    def test_pot_provider_transport_failure_retries_once(self) -> None:
+        error = classify_youtube_failure(
+            b"ERROR: PO Token Provider request timed out with HTTP Error 503"
+        )
+        self.assertEqual(error.code, "YOUTUBE_TEMPORARILY_UNAVAILABLE")
+        self.assertTrue(error.retryable)
 
 
 class FakeRepository:

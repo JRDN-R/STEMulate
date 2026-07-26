@@ -33,6 +33,20 @@ def _required_environment(name: str, pattern: re.Pattern[str]) -> str:
     return value
 
 
+def _youtube_pot_provider_url() -> str:
+    value = os.environ.get("YOUTUBE_POT_PROVIDER_URL", "").strip().rstrip("/")
+    if not value:
+        raise RuntimeError("YOUTUBE_POT_PROVIDER_URL is missing or invalid")
+    # The provider is deliberately reachable only through the Cloud Run
+    # instance's shared loopback network. Do not turn this into an arbitrary
+    # environment-configured HTTP client.
+    if value != "http://127.0.0.1:4416":
+        raise RuntimeError(
+            "YOUTUBE_POT_PROVIDER_URL must be http://127.0.0.1:4416"
+        )
+    return value
+
+
 def build_default_worker() -> IngestWorker:
     # The queue is configured for two total attempts, so retry-count values are
     # 0 for the first dispatch and 1 for the final dispatch.
@@ -47,7 +61,11 @@ def build_default_worker() -> IngestWorker:
         raise RuntimeError("WORK_ROOT is not writable by the service identity")
     return IngestWorker(
         FirestoreJobRepository(),
-        MediaPipeline(SubprocessRunner(), ToolPaths()),
+        MediaPipeline(
+            SubprocessRunner(),
+            ToolPaths(),
+            youtube_pot_provider_url=_youtube_pot_provider_url(),
+        ),
         SignedUploader(),
         spotify_client_id=os.environ.get("SPOTIFY_CLIENT_ID") or None,
         spotify_client_secret=os.environ.get("SPOTIFY_CLIENT_SECRET") or None,
