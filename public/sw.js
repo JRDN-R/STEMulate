@@ -11,7 +11,14 @@ const APP_SHELL = [
   "./icons/apple-touch-icon.png",
 ];
 const PRECACHE_URLS = [...new Set([...APP_SHELL, ...BUILD_ASSETS])];
-const STATIC_DESTINATIONS = new Set(["script", "style", "image", "font", "manifest"]);
+const STATIC_DESTINATIONS = new Set([
+  "script",
+  "worker",
+  "style",
+  "image",
+  "font",
+  "manifest",
+]);
 
 function scopedUrl(path) {
   return new URL(path, self.registration.scope).href;

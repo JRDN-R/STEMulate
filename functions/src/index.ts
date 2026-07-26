@@ -4,11 +4,15 @@ import { getFunctions } from "firebase-admin/functions";
 import { getStorage } from "firebase-admin/storage";
 import { logger } from "firebase-functions";
 import { setGlobalOptions } from "firebase-functions/v2";
-import { onDocumentCreated } from "firebase-functions/v2/firestore";
+import {
+  onDocumentCreated,
+  onDocumentUpdated,
+} from "firebase-functions/v2/firestore";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { onObjectFinalized } from "firebase-functions/v2/storage";
 import { onTaskDispatched } from "firebase-functions/v2/tasks";
+import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { Readable, Transform } from "node:stream";
@@ -53,6 +57,21 @@ import {
   type RemoteProvider,
   validateClientRequestId,
 } from "./remote-import";
+import {
+  MAX_PREVIEW_MANIFEST_BYTES,
+  PREVIEW_STEM_IDS,
+  previewManifestPath,
+  validatePreviewManifestV1,
+  type PreviewManifestV1,
+} from "./preview-manifest";
+import {
+  preparePreviewOutputs,
+} from "./preview-outputs";
+import {
+  enqueuePreviewTask,
+  previewServiceConfig,
+  type PreviewTaskPayload,
+} from "./preview-tasks";
 
 initializeApp();
 setGlobalOptions({ region: REGION, maxInstances: 10 });
@@ -97,6 +116,10 @@ interface GetOutputsInput {
   jobId?: unknown;
 }
 
+interface PreviewJobInput {
+  jobId?: unknown;
+}
+
 interface RenameJobInput {
   jobId?: unknown;
   displayName?: unknown;
@@ -128,6 +151,20 @@ interface StoredOutput {
   storagePath: string;
   contentType: string;
   sizeBytes: number;
+}
+
+type PreviewStatus =
+  | "unavailable"
+  | "queued"
+  | "processing"
+  | "retrying"
+  | "awaiting_finalize"
+  | "ready"
+  | "failed";
+
+interface PreviewError {
+  code: string;
+  message: string;
 }
 
 interface InternalMusicAiWorkflow {
@@ -166,7 +203,14 @@ interface InternalJob {
   expectedOutputKeys?: string[];
   outputs?: Record<string, StoredOutput>;
   analysis?: Record<string, string | number | boolean>;
+  previewStatus?: PreviewStatus;
+  previewAttempt?: number;
+  previewManifestPath?: string;
+  previewLeaseUntil?: Timestamp;
+  previewRequestedAt?: Timestamp;
+  previewError?: PreviewError;
   createdAt?: Timestamp;
+  updatedAt?: Timestamp;
 }
 
 function workflowPlanForJob(job: InternalJob): MusicAiWorkflow[] {
@@ -313,6 +357,321 @@ function safeErrorFields(error: unknown): Record<string, string | number | boole
   };
 }
 
+function normalizedPreviewStatus(job: InternalJob): PreviewStatus {
+  return job.previewStatus ?? "unavailable";
+}
+
+async function markPreviewFailed(
+  jobId: string,
+  ownerUid: string,
+  code: string,
+  message: string,
+  expectedAttempt?: number,
+  invalidateReady = false,
+): Promise<void> {
+  const previewError = { code, message: message.slice(0, 500) };
+  const internalRef = internalJobRef(jobId);
+  await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(internalRef);
+    if (!snapshot.exists) return;
+    const job = snapshot.data() as InternalJob;
+    if (job.ownerUid !== ownerUid) {
+      throw new Error("Preview failure owner does not match job owner.");
+    }
+    if (
+      (job.previewStatus === "ready" && !invalidateReady)
+      || (
+        expectedAttempt !== undefined
+        && job.previewAttempt !== expectedAttempt
+      )
+    ) return;
+    transaction.set(
+      internalRef,
+      {
+        previewStatus: "failed",
+        previewError,
+        previewLeaseOwner: FieldValue.delete(),
+        previewLeaseUntil: FieldValue.delete(),
+        previewFailedAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+    transaction.set(
+      publicJobRef(ownerUid, jobId),
+      {
+        previewStatus: "failed",
+        previewError,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+  });
+}
+
+interface PreparedPreview {
+  status: PreviewStatus;
+  attempt?: number;
+  payload?: PreviewTaskPayload;
+  error?: PreviewError;
+}
+
+async function preparePreviewTask(
+  jobId: string,
+  ownerUid: string,
+  retryFailed: boolean,
+  recoverExpiredLease = false,
+): Promise<PreparedPreview> {
+  const internalRef = internalJobRef(jobId);
+  return db.runTransaction(async (transaction): Promise<PreparedPreview> => {
+    const snapshot = await transaction.get(internalRef);
+    if (!snapshot.exists) {
+      throw new HttpsError("not-found", "The processing job does not exist.");
+    }
+    const job = snapshot.data() as InternalJob;
+    if (job.ownerUid !== ownerUid) {
+      throw new HttpsError("not-found", "The processing job does not exist.");
+    }
+    if (job.status !== "completed") {
+      throw new HttpsError(
+        "failed-precondition",
+        "The original processing outputs are not ready.",
+      );
+    }
+
+    const status = normalizedPreviewStatus(job);
+    const leaseExpired = (
+      status === "processing"
+      || status === "awaiting_finalize"
+    ) && (
+      !(job.previewLeaseUntil instanceof Timestamp)
+      || job.previewLeaseUntil.toMillis() <= Date.now()
+    );
+    const recoverActive = recoverExpiredLease && leaseExpired;
+    if (
+      status === "ready"
+      || (status === "processing" && !recoverActive)
+      || status === "retrying"
+      || (status === "awaiting_finalize" && !recoverActive)
+      || (status === "failed" && !retryFailed)
+    ) {
+      return { status, error: job.previewError };
+    }
+
+    const outputs = preparePreviewOutputs(
+      ownerUid,
+      jobId,
+      Object.values(job.outputs ?? {}),
+    );
+    if (outputs.length === 0) {
+      const error = {
+        code: "PREVIEW_STEMS_UNAVAILABLE",
+        message: "No canonical audio stems are available for streaming previews.",
+      };
+      transaction.set(
+        internalRef,
+        {
+          previewStatus: "failed",
+          previewError: error,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      transaction.set(
+        publicJobRef(ownerUid, jobId),
+        {
+          previewStatus: "failed",
+          previewError: error,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return { status: "failed", error };
+    }
+
+    const previousAttempt = Number.isSafeInteger(job.previewAttempt)
+      ? Number(job.previewAttempt)
+      : 0;
+    const attempt = status === "queued"
+      ? Math.max(1, previousAttempt)
+      : previousAttempt + 1;
+    if (attempt > 99) {
+      const error = {
+        code: "PREVIEW_RETRY_LIMIT",
+        message: "The streaming preview retry limit has been reached.",
+      };
+      transaction.set(
+        internalRef,
+        {
+          previewStatus: "failed",
+          previewError: error,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      transaction.set(
+        publicJobRef(ownerUid, jobId),
+        {
+          previewStatus: "failed",
+          previewError: error,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return { status: "failed", error };
+    }
+
+    const manifestPath = previewManifestPath(ownerUid, jobId, attempt);
+    const payload: PreviewTaskPayload = {
+      jobId,
+      ownerUid,
+      attempt,
+      storageBucket: getStorage().bucket().name,
+      outputs,
+      manifestPath,
+    };
+    transaction.set(
+      internalRef,
+      {
+        previewStatus: "queued",
+        previewAttempt: attempt,
+        previewManifestPath: manifestPath,
+        previewError: FieldValue.delete(),
+        previewLeaseOwner: FieldValue.delete(),
+        previewLeaseUntil: FieldValue.delete(),
+        previewRequestedAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+    transaction.set(
+      publicJobRef(ownerUid, jobId),
+      {
+        previewStatus: "queued",
+        previewManifestPath: manifestPath,
+        previewError: null,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+    return { status: "queued", attempt, payload };
+  });
+}
+
+async function recoverExpiredPreviewTask(
+  jobId: string,
+  ownerUid: string,
+): Promise<PreparedPreview> {
+  const prepared = await preparePreviewTask(
+    jobId,
+    ownerUid,
+    false,
+    true,
+  );
+  if (!prepared.payload || !prepared.attempt) return prepared;
+  try {
+    previewServiceConfig();
+    await enqueuePreviewTask(prepared.payload, prepared.attempt);
+    logger.warn("Recovered an expired preview worker lease.", {
+      jobId,
+      attempt: prepared.attempt,
+    });
+    return { status: "queued", attempt: prepared.attempt };
+  } catch (error) {
+    logger.error("Expired preview lease recovery could not be queued.", {
+      jobId,
+      attempt: prepared.attempt,
+      ...safeErrorFields(error),
+    });
+    const previewError = {
+      code: "PREVIEW_QUEUE_UNAVAILABLE",
+      message: "The streaming preview could not be recovered. The original stems remain available.",
+    };
+    await markPreviewFailed(
+      jobId,
+      ownerUid,
+      previewError.code,
+      previewError.message,
+      prepared.attempt,
+    );
+    return {
+      status: "failed",
+      attempt: prepared.attempt,
+      error: previewError,
+    };
+  }
+}
+
+async function readPreviewManifest(
+  ownerUid: string,
+  jobId: string,
+  attempt: number,
+): Promise<PreviewManifestV1> {
+  const file = getStorage()
+    .bucket()
+    .file(previewManifestPath(ownerUid, jobId, attempt));
+  const [metadata] = await file.getMetadata();
+  const sizeBytes = Number(metadata.size ?? 0);
+  if (
+    !Number.isSafeInteger(sizeBytes)
+    || sizeBytes <= 0
+    || sizeBytes > MAX_PREVIEW_MANIFEST_BYTES
+    || metadata.contentType?.toLowerCase() !== "application/json"
+    || metadata.metadata?.["stemulate-job-id"] !== jobId
+    || metadata.metadata?.["stemulate-manifest-version"] !== "1"
+    || metadata.metadata?.["stemulate-preview-attempt"] !== String(attempt)
+  ) {
+    throw new Error("Preview manifest metadata is invalid.");
+  }
+  const [contents] = await file.download();
+  if (contents.byteLength !== sizeBytes) {
+    throw new Error("Preview manifest size changed while it was read.");
+  }
+  const expectedHash = metadata.metadata?.sha256;
+  const actualHash = createHash("sha256").update(contents).digest("hex");
+  if (
+    typeof expectedHash !== "string"
+    || !/^[a-f0-9]{64}$/.test(expectedHash)
+    || expectedHash !== actualHash
+  ) {
+    throw new Error("Preview manifest checksum is invalid.");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents.toString("utf8"));
+  } catch {
+    throw new Error("Preview manifest is not valid JSON.");
+  }
+  return validatePreviewManifestV1(parsed, ownerUid, jobId, attempt);
+}
+
+async function verifyPreviewObjects(
+  manifest: PreviewManifestV1,
+  jobId: string,
+  attempt: number,
+): Promise<void> {
+  const bucket = getStorage().bucket();
+  await Promise.all(PREVIEW_STEM_IDS.map(async (stemId) => {
+    const stem = manifest.stems[stemId];
+    if (!stem) return;
+    const [metadata] = await bucket.file(stem.storagePath).getMetadata();
+    const sizeBytes = Number(metadata.size ?? 0);
+    const sha256 = metadata.metadata?.sha256;
+    if (
+      sizeBytes !== stem.sizeBytes
+      || metadata.contentType?.toLowerCase() !== "audio/aac"
+      || metadata.metadata?.["stemulate-job-id"] !== jobId
+      || metadata.metadata?.["stemulate-stem-id"] !== stemId
+      || metadata.metadata?.["stemulate-manifest-version"] !== "1"
+      || metadata.metadata?.["stemulate-preview-attempt"] !== String(attempt)
+      || typeof sha256 !== "string"
+      || !/^[a-f0-9]{64}$/.test(sha256)
+    ) {
+      throw new Error("Preview stem metadata does not match its manifest.");
+    }
+  }));
+}
+
 export const createProcessingJob = onCall<CreateJobInput>(
   {
     cors: CALLABLE_CORS,
@@ -358,6 +717,7 @@ export const createProcessingJob = onCall<CreateJobInput>(
       sourceType: "upload" as const,
       status: "awaiting_upload" as const,
       stage: "awaiting_upload",
+      previewStatus: "unavailable" as const,
       outputs: [],
       error: null,
       createdAt: now,
@@ -370,6 +730,7 @@ export const createProcessingJob = onCall<CreateJobInput>(
       expectedSizeBytes: Number(sizeBytes),
       sourceKind: "upload" as const,
       status: "awaiting_upload" as const,
+      previewStatus: "unavailable" as const,
       createdAt: now,
       updatedAt: now,
     };
@@ -488,6 +849,7 @@ export const createRemoteProcessingJob = onCall<CreateRemoteJobInput>(
         sourceProvider: source.provider,
         status: "awaiting_upload",
         stage: "queued_for_download",
+        previewStatus: "unavailable",
         outputs: [],
         error: null,
         createdAt: now,
@@ -504,6 +866,7 @@ export const createRemoteProcessingJob = onCall<CreateRemoteJobInput>(
         rightsConfirmedAt: now,
         downloadStatus: "queued",
         status: "awaiting_upload",
+        previewStatus: "unavailable",
         createdAt: now,
         updatedAt: now,
       });
@@ -643,6 +1006,289 @@ export const expireStaleRemoteImports = onSchedule(
   },
 );
 
+export const enqueueCompletedPreview = onDocumentUpdated(
+  {
+    document: "internalJobs/{jobId}",
+    retry: true,
+    timeoutSeconds: 120,
+    memory: "256MiB",
+    maxInstances: 5,
+  },
+  async (event) => {
+    const before = event.data?.before.data() as InternalJob | undefined;
+    const after = event.data?.after.data() as InternalJob | undefined;
+    if (!after || after.status !== "completed" || !after.ownerUid) return;
+    if (
+      before?.status === "completed"
+      && normalizedPreviewStatus(after) !== "unavailable"
+    ) return;
+
+    const jobId = event.params.jobId;
+    let prepared: PreparedPreview | undefined;
+    try {
+      prepared = await preparePreviewTask(jobId, after.ownerUid, false);
+      if (!prepared.payload || !prepared.attempt) return;
+      previewServiceConfig();
+      await enqueuePreviewTask(prepared.payload, prepared.attempt);
+    } catch (error) {
+      logger.error("Automatic preview enqueue failed.", {
+        jobId,
+        ...safeErrorFields(error),
+      });
+      await markPreviewFailed(
+        jobId,
+        after.ownerUid,
+        "PREVIEW_QUEUE_UNAVAILABLE",
+        "The streaming preview could not be queued. The original stems remain available.",
+        prepared?.attempt,
+      );
+    }
+  },
+);
+
+export const requestProcessingPreview = onCall<PreviewJobInput>(
+  {
+    cors: CALLABLE_CORS,
+    enforceAppCheck: true,
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (request) => {
+    const ownerUid = requireOwner(request);
+    const jobId = requiredString(request.data.jobId, "jobId", 128);
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) {
+      throw new HttpsError("invalid-argument", "jobId is invalid.");
+    }
+
+    const prepared = await preparePreviewTask(jobId, ownerUid, true, true);
+    if (!prepared.payload || !prepared.attempt) {
+      return {
+        jobId,
+        status: prepared.status,
+        ...(prepared.error ? { error: prepared.error } : {}),
+      };
+    }
+    try {
+      previewServiceConfig();
+      await enqueuePreviewTask(prepared.payload, prepared.attempt);
+    } catch (error) {
+      logger.error("Requested preview enqueue failed.", {
+        jobId,
+        ...safeErrorFields(error),
+      });
+      await markPreviewFailed(
+        jobId,
+        ownerUid,
+        "PREVIEW_QUEUE_UNAVAILABLE",
+        "The streaming preview service is not available yet. The original stems remain available.",
+        prepared.attempt,
+      );
+      throw new HttpsError(
+        "unavailable",
+        "The streaming preview service is not available yet.",
+      );
+    }
+    return { jobId, status: "queued" as const };
+  },
+);
+
+export const getProcessingPreview = onCall<PreviewJobInput>(
+  {
+    cors: CALLABLE_CORS,
+    enforceAppCheck: true,
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  async (request) => {
+    const ownerUid = requireOwner(request);
+    const jobId = requiredString(request.data.jobId, "jobId", 128);
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) {
+      throw new HttpsError("invalid-argument", "jobId is invalid.");
+    }
+    const internalRef = internalJobRef(jobId);
+    const snapshot = await internalRef.get();
+    if (!snapshot.exists) {
+      throw new HttpsError("not-found", "The processing job does not exist.");
+    }
+    const job = snapshot.data() as InternalJob;
+    if (job.ownerUid !== ownerUid) {
+      throw new HttpsError("not-found", "The processing job does not exist.");
+    }
+    if (job.status !== "completed") {
+      throw new HttpsError(
+        "failed-precondition",
+        "The original processing outputs are not ready.",
+      );
+    }
+
+    const status = normalizedPreviewStatus(job);
+    const attempt = Number.isSafeInteger(job.previewAttempt)
+      ? Number(job.previewAttempt)
+      : 0;
+    const leaseExpired = (
+      status === "processing"
+      || status === "awaiting_finalize"
+    ) && (
+      !(job.previewLeaseUntil instanceof Timestamp)
+      || job.previewLeaseUntil.toMillis() <= Date.now()
+    );
+    if (status === "processing" && leaseExpired) {
+      const recovered = await recoverExpiredPreviewTask(jobId, ownerUid);
+      return {
+        jobId,
+        // A concurrent finalizer can win between the stale snapshot and the
+        // recovery transaction. Return one more active snapshot so the next
+        // poll reads and signs that ready manifest instead of emitting a
+        // malformed ready response without URLs.
+        status: recovered.status === "ready" ? "processing" : recovered.status,
+        ...(recovered.error ? { error: recovered.error } : {}),
+      };
+    }
+    if (status !== "ready" && status !== "awaiting_finalize") {
+      return {
+        jobId,
+        status,
+        ...(job.previewError ? { error: job.previewError } : {}),
+      };
+    }
+
+    if (attempt < 1 || attempt > 99) {
+      const previewError = {
+        code: "PREVIEW_STATE_INVALID",
+        message: "The streaming preview state is invalid and must be regenerated.",
+      };
+      await markPreviewFailed(
+        jobId,
+        ownerUid,
+        previewError.code,
+        previewError.message,
+        job.previewAttempt,
+        true,
+      );
+      return { jobId, status: "failed" as const, error: previewError };
+    }
+    const manifestPath = previewManifestPath(ownerUid, jobId, attempt);
+    if (job.previewManifestPath !== manifestPath) {
+      const previewError = {
+        code: "PREVIEW_STATE_INVALID",
+        message: "The streaming preview state is invalid and must be regenerated.",
+      };
+      await markPreviewFailed(
+        jobId,
+        ownerUid,
+        previewError.code,
+        previewError.message,
+        attempt,
+        true,
+      );
+      return { jobId, status: "failed" as const, error: previewError };
+    }
+
+    if (status === "awaiting_finalize") {
+      const [manifestExists] = await getStorage()
+        .bucket()
+        .file(manifestPath)
+        .exists();
+      if (!manifestExists) {
+        if (leaseExpired) {
+          const recovered = await recoverExpiredPreviewTask(jobId, ownerUid);
+          return {
+            jobId,
+            status: recovered.status === "ready"
+              ? "awaiting_finalize"
+              : recovered.status,
+            ...(recovered.error ? { error: recovered.error } : {}),
+          };
+        }
+        return { jobId, status: "awaiting_finalize" as const };
+      }
+    }
+
+    let manifest: PreviewManifestV1;
+    try {
+      manifest = await readPreviewManifest(ownerUid, jobId, attempt);
+      await verifyPreviewObjects(manifest, jobId, attempt);
+    } catch (error) {
+      logger.error("Stored preview manifest failed validation.", {
+        jobId,
+        ...safeErrorFields(error),
+      });
+      const previewError = {
+        code: "PREVIEW_MANIFEST_INVALID",
+        message: "The streaming preview is invalid and must be regenerated.",
+      };
+      await markPreviewFailed(
+        jobId,
+        ownerUid,
+        previewError.code,
+        previewError.message,
+        job.previewAttempt,
+        true,
+      );
+      return { jobId, status: "failed" as const, error: previewError };
+    }
+
+    if (status === "awaiting_finalize") {
+      await db.runTransaction(async (transaction) => {
+        const fresh = await transaction.get(internalRef);
+        if (!fresh.exists) return;
+        const freshJob = fresh.data() as InternalJob;
+        if (
+          freshJob.ownerUid !== ownerUid
+          || freshJob.previewAttempt !== attempt
+          || freshJob.previewManifestPath !== manifestPath
+          || freshJob.previewStatus === "failed"
+          || freshJob.previewStatus === "ready"
+        ) return;
+        transaction.set(
+          internalRef,
+          {
+            previewStatus: "ready",
+            previewError: FieldValue.delete(),
+            previewLeaseOwner: FieldValue.delete(),
+            previewLeaseUntil: FieldValue.delete(),
+            previewReadyAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+        transaction.set(
+          publicJobRef(ownerUid, jobId),
+          {
+            previewStatus: "ready",
+            previewManifestPath: manifestPath,
+            previewError: null,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+      });
+    }
+
+    const expiresAt = Date.now() + 6 * 60 * 60 * 1000;
+    const bucket = getStorage().bucket();
+    const signedEntries = await Promise.all(PREVIEW_STEM_IDS.flatMap((stemId) => {
+      const stem = manifest.stems[stemId];
+      if (!stem) return [];
+      return [bucket.file(stem.storagePath).getSignedUrl({
+        action: "read",
+        version: "v4",
+        expires: expiresAt,
+      }).then(([url]) => [stemId, { ...stem, url }] as const)];
+    }));
+
+    return {
+      jobId,
+      status: "ready" as const,
+      expiresAt,
+      manifest: {
+        ...manifest,
+        stems: Object.fromEntries(signedEntries),
+      },
+    };
+  },
+);
+
 export const getProcessingOutputs = onCall<GetOutputsInput>(
   {
     cors: CALLABLE_CORS,
@@ -729,6 +1375,96 @@ export const renameProcessingJob = onCall<RenameJobInput>(
     });
 
     return { jobId, displayName };
+  },
+);
+
+export const finalizeProcessingPreview = onObjectFinalized(
+  {
+    region: STORAGE_TRIGGER_REGION,
+    retry: true,
+    timeoutSeconds: 120,
+    memory: "256MiB",
+    maxInstances: 5,
+  },
+  async (event) => {
+    const objectPath = event.data.name;
+    if (!objectPath) return;
+    const match = objectPath.match(
+      /^users\/([A-Za-z0-9_-]{1,128})\/jobs\/([A-Za-z0-9_-]{1,128})\/streams\/v1\/attempt-([1-9][0-9]?)\/manifest\.json$/,
+    );
+    if (!match) return;
+    const [, ownerUid, jobId, attemptText] = match;
+    const attempt = Number(attemptText);
+    const internalRef = internalJobRef(jobId);
+    const snapshot = await internalRef.get();
+    if (!snapshot.exists) return;
+    const job = snapshot.data() as InternalJob;
+    if (
+      job.ownerUid !== ownerUid
+      || job.status !== "completed"
+      || job.previewAttempt !== attempt
+      || job.previewManifestPath !== objectPath
+    ) {
+      logger.error("Preview manifest does not match its completed job.", {
+        jobId,
+        objectPath,
+      });
+      return;
+    }
+
+    try {
+      const manifest = await readPreviewManifest(ownerUid, jobId, attempt);
+      await verifyPreviewObjects(manifest, jobId, attempt);
+    } catch (error) {
+      logger.error("Preview finalization rejected an invalid manifest.", {
+        jobId,
+        ...safeErrorFields(error),
+      });
+      await markPreviewFailed(
+        jobId,
+        ownerUid,
+        "PREVIEW_MANIFEST_INVALID",
+        "The streaming preview is invalid and must be regenerated.",
+        job.previewAttempt,
+        true,
+      );
+      return;
+    }
+
+    await db.runTransaction(async (transaction) => {
+      const fresh = await transaction.get(internalRef);
+      if (!fresh.exists) return;
+      const freshJob = fresh.data() as InternalJob;
+      if (
+        freshJob.ownerUid !== ownerUid
+        || freshJob.status !== "completed"
+        || freshJob.previewAttempt !== attempt
+        || freshJob.previewManifestPath !== objectPath
+      ) return;
+      transaction.set(
+        internalRef,
+        {
+          previewStatus: "ready",
+          previewManifestPath: objectPath,
+          previewError: FieldValue.delete(),
+          previewLeaseOwner: FieldValue.delete(),
+          previewLeaseUntil: FieldValue.delete(),
+          previewReadyAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      transaction.set(
+        publicJobRef(ownerUid, jobId),
+        {
+          previewStatus: "ready",
+          previewManifestPath: objectPath,
+          previewError: null,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    });
   },
 );
 

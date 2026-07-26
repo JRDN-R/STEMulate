@@ -46,6 +46,7 @@ test("precaches every hashed production script and stylesheet", async () => {
   }
   assert.doesNotMatch(serviceWorker, /__STEMULATE_(?:BUILD_ID|PRECACHE_ASSETS)__/);
   assert.match(serviceWorker, /event\.request\.mode\s*===\s*"navigate"/);
+  assert.match(serviceWorker, /STATIC_DESTINATIONS[\s\S]*"worker"/);
 
   const navigationHandler = serviceWorker.slice(
     serviceWorker.indexOf("async function navigationResponse"),

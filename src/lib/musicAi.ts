@@ -1,9 +1,10 @@
 import { doc, getDoc, onSnapshot } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
+import { httpsCallable, type HttpsCallable } from "firebase/functions";
 import { ref, uploadBytesResumable } from "firebase/storage";
 
 import type {
   AnalysisData,
+  CompletedJobResult,
   ProcessingStage,
   RemoteSourceProvider,
   RemoteTrackResult,
@@ -22,9 +23,14 @@ import {
   normalizeSections,
 } from "./musicAnalysis";
 import { validateRemoteImportUrl } from "./remoteSources";
+import {
+  validateStemPreviewManifest,
+  type StemPreviewManifest,
+} from "./stemPreviewManifest";
 import { normalizeStemOutputs } from "./stems";
 
 export const backendConfigured = firebaseBackendConfigured;
+export type { CompletedJobResult } from "../types";
 
 type StageCallback = (stage: ProcessingStage, detail: string) => void;
 
@@ -59,19 +65,42 @@ type CreateRemoteJobResult = {
   status: "queued_for_download";
 };
 
-export type CompletedJobResult = {
-  analysis: AnalysisData;
-  jobId: string;
-  outputsExpireAt: number;
-  displayName?: string;
-  sourceProvider?: RemoteSourceProvider;
-};
-
 type PlaybackOutput = {
   key: string;
   url: string;
   contentType?: string;
   sizeBytes?: number;
+};
+
+export type ProcessingPreviewStatus =
+  | "unavailable"
+  | "queued"
+  | "processing"
+  | "retrying"
+  | "awaiting_finalize"
+  | "ready"
+  | "failed";
+
+export type ProcessingPreviewError = {
+  code: string;
+  message: string;
+};
+
+export type ProcessingPreviewResult = {
+  jobId: string;
+  status: ProcessingPreviewStatus;
+  manifest: StemPreviewManifest | null;
+  expiresAt: number | null;
+  error: ProcessingPreviewError | null;
+  requestAttempted: boolean;
+};
+
+export type ProcessingPreviewOptions = {
+  /**
+   * Queue one generation attempt when the current state is unavailable or
+   * failed. The server keeps this idempotent for already-active previews.
+   */
+  requestIfMissing?: boolean;
 };
 
 type ActiveRemoteJob = {
@@ -95,6 +124,16 @@ type LatestCompletedJob = {
 const ACTIVE_REMOTE_JOB_KEY = "stemulate.active-remote-job.v1";
 const LATEST_COMPLETED_JOB_KEY = "stemulate.latest-completed-job.v1";
 const MAX_REMOTE_ARTIFACT_BYTES = 16 * 1024 * 1024;
+const PREVIEW_JOB_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const PREVIEW_STATUSES = new Set<ProcessingPreviewStatus>([
+  "unavailable",
+  "queued",
+  "processing",
+  "retrying",
+  "awaiting_finalize",
+  "ready",
+  "failed",
+]);
 
 class TerminalJobError extends Error {
   constructor(message: string) {
@@ -109,6 +148,187 @@ function abortError() {
 
 function artifactLimitError() {
   return new TerminalJobError("A Music.ai text artifact exceeded the 16 MiB safety limit.");
+}
+
+function previewError(
+  code: string,
+  message: string,
+): ProcessingPreviewError {
+  return {
+    code: code.slice(0, 120) || "PREVIEW_UNAVAILABLE",
+    message: message.slice(0, 500) || "The streaming preview is unavailable.",
+  };
+}
+
+function unavailablePreview(
+  jobId: string,
+  error: ProcessingPreviewError | null,
+  requestAttempted = false,
+): ProcessingPreviewResult {
+  return {
+    jobId,
+    status: "unavailable",
+    manifest: null,
+    expiresAt: null,
+    error,
+    requestAttempted,
+  };
+}
+
+function caughtPreviewError(error: unknown): ProcessingPreviewError {
+  const record = error && typeof error === "object"
+    ? error as Record<string, unknown>
+    : null;
+  const rawCode = record && typeof record.code === "string"
+    ? record.code
+    : "PREVIEW_UNAVAILABLE";
+  const rawMessage = error instanceof Error
+    ? error.message
+    : "The streaming preview is unavailable.";
+  return previewError(rawCode, rawMessage);
+}
+
+function readPreviewError(value: unknown): ProcessingPreviewError | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.code !== "string" || typeof record.message !== "string") {
+    return null;
+  }
+  return previewError(record.code, record.message);
+}
+
+function parsePreviewResponse(
+  jobId: string,
+  value: unknown,
+  requestAttempted: boolean,
+  requireReadyManifest: boolean,
+): ProcessingPreviewResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("The preview callable returned an invalid response.");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.jobId !== jobId || !PREVIEW_STATUSES.has(record.status as ProcessingPreviewStatus)) {
+    throw new TypeError("The preview callable returned invalid job or status data.");
+  }
+  const status = record.status as ProcessingPreviewStatus;
+  const error = readPreviewError(record.error);
+  if (status !== "ready") {
+    return {
+      jobId,
+      status,
+      manifest: null,
+      expiresAt: null,
+      error,
+      requestAttempted,
+    };
+  }
+  if (!requireReadyManifest) {
+    return {
+      jobId,
+      status,
+      manifest: null,
+      expiresAt: null,
+      error,
+      requestAttempted,
+    };
+  }
+
+  const expiresAt = Number(record.expiresAt);
+  if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) {
+    throw new TypeError("The preview callable returned invalid signed-link expiry data.");
+  }
+  return {
+    jobId,
+    status,
+    manifest: validateStemPreviewManifest(record.manifest),
+    expiresAt,
+    error,
+    requestAttempted,
+  };
+}
+
+/**
+ * Reads one preview-state snapshot and, when requested, queues at most one
+ * generation attempt. This deliberately does not poll: callers can render the
+ * original WAV-backed deck immediately and check again in the background.
+ *
+ * Preview deployment, validation, or generation errors are represented in the
+ * result and never reject the original processing-output flow.
+ */
+export async function getOrRequestProcessingPreview(
+  jobId: string,
+  options: ProcessingPreviewOptions = {},
+): Promise<ProcessingPreviewResult> {
+  if (!PREVIEW_JOB_ID_PATTERN.test(jobId)) {
+    return unavailablePreview(
+      jobId,
+      previewError("PREVIEW_JOB_INVALID", "The preview job identifier is invalid."),
+    );
+  }
+  if (!backendConfigured) {
+    return unavailablePreview(
+      jobId,
+      previewError("PREVIEW_BACKEND_UNCONFIGURED", "The streaming preview backend is not configured."),
+    );
+  }
+  try {
+    if (!getOwnerUser()) {
+      return unavailablePreview(
+        jobId,
+        previewError("PREVIEW_AUTH_REQUIRED", "Sign in before loading a streaming preview."),
+      );
+    }
+  } catch (error) {
+    return unavailablePreview(
+      jobId,
+      caughtPreviewError(error),
+    );
+  }
+
+  let getPreview: HttpsCallable<{ jobId: string }, unknown>;
+  try {
+    getPreview = httpsCallable<{ jobId: string }, unknown>(
+      getStemulateFunctions(),
+      "getProcessingPreview",
+    );
+  } catch (error) {
+    return unavailablePreview(jobId, caughtPreviewError(error));
+  }
+  let current: ProcessingPreviewResult;
+  try {
+    const response = await getPreview({ jobId });
+    current = parsePreviewResponse(jobId, response.data, false, true);
+  } catch (error) {
+    return unavailablePreview(jobId, caughtPreviewError(error));
+  }
+
+  const shouldRequest = options.requestIfMissing !== false
+    && (current.status === "unavailable" || current.status === "failed");
+  if (!shouldRequest) return current;
+
+  let requested: ProcessingPreviewResult;
+  try {
+    const requestPreview = httpsCallable<{ jobId: string }, unknown>(
+      getStemulateFunctions(),
+      "requestProcessingPreview",
+    );
+    const response = await requestPreview({ jobId });
+    requested = parsePreviewResponse(jobId, response.data, true, false);
+  } catch (error) {
+    return {
+      ...current,
+      error: caughtPreviewError(error),
+      requestAttempted: true,
+    };
+  }
+  if (requested.status !== "ready") return requested;
+
+  try {
+    const response = await getPreview({ jobId });
+    return parsePreviewResponse(jobId, response.data, true, true);
+  } catch (error) {
+    return unavailablePreview(jobId, caughtPreviewError(error), true);
+  }
 }
 
 async function readBoundedText(response: Response): Promise<string> {
@@ -496,7 +716,7 @@ export async function analyzeFile(
   file: File,
   onStage: StageCallback,
   signal?: AbortSignal,
-): Promise<AnalysisData> {
+): Promise<CompletedJobResult> {
   if (!backendConfigured) {
     throw new Error("The secure Firebase backend is not configured yet.");
   }
@@ -527,7 +747,7 @@ export async function analyzeFile(
 
   await uploadSource(job.inputPath, file, contentType, onStage, signal);
   onStage("analyze", "Upload complete · waiting for analysis");
-  return (await waitForJob(owner.uid, job.jobId, onStage, signal)).analysis;
+  return waitForJob(owner.uid, job.jobId, onStage, signal);
 }
 
 export async function analyzeRemoteTrack(
@@ -656,7 +876,12 @@ async function finishRemoteJob(
     ? "Spotify track · spotDL → YouTube Music · Music.ai"
     : "YouTube track · yt-dlp · Music.ai";
 
-  return { analysis: completed.analysis, title, source, provider };
+  return {
+    ...completed,
+    title,
+    source,
+    provider,
+  };
 }
 
 export async function resumeRemoteTrack(

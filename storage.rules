@@ -40,6 +40,12 @@ service firebase.storage {
         && job(userId, jobId).status in ['completed', 'failed'];
     }
 
+    // Stream objects are written by the private preview worker and delivered
+    // only through short-lived signed URLs returned by a trusted callable.
+    match /users/{userId}/jobs/{jobId}/streams/v1/{streamPath=**} {
+      allow read, write: if false;
+    }
+
     match /{allPaths=**} {
       allow read, write: if false;
     }

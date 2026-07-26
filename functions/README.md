@@ -5,7 +5,10 @@ creates a job with an App Check-protected callable, uploads the source directly
 to Cloud Storage, and watches its owner-only Firestore record. A Storage event
 then submits one or more short Music.ai requests against the same signed input.
 Cloud Tasks polls each status with delayed, finite invocations, merges their
-results, and copies successful output URLs into private Storage.
+results, and copies successful output URLs into private Storage. When those
+original outputs are complete, a separate private Cloud Run worker creates
+range-addressable AAC playback copies. Original WAV/FLAC outputs remain
+untouched for export.
 
 No Music.ai key or signed source URL is ever returned to the browser or stored
 in the client-readable job document. `yt-dlp` and spotDL live in the separate
@@ -31,6 +34,9 @@ the static site or an HTTP callable.
   module connected so `beatMap` feeds the Sections module's `inputBeatsUrl`.
 - Deploy the private downloader by following `../ingest-service/README.md`. Copy
   its `run.app` base URL and create the `stemulate-downloads` Cloud Tasks queue.
+- Deploy the private preview worker by following `../stream-service/README.md`.
+  Copy its `run.app` base URL and create the `stemulate-previews` Cloud Tasks
+  queue. Keep both Cloud Run services private.
 
 ## 2. Install and configure
 
@@ -43,8 +49,9 @@ firebase functions:secrets:set MUSIC_AI_API_KEY
 ```
 
 Edit `functions/.env.stem-ulate` with the Firebase Auth UID, Music.ai workflow
-slug(s), exact workflow input parameter, private downloader URL, queue name, and
-task-invoker service-account email. For the three-template setup, use:
+slug(s), exact workflow input parameter, both private Cloud Run URLs, queue
+names, and task-invoker service-account emails. For the three-template setup,
+use:
 
 ```text
 MUSIC_AI_WORKFLOW_SLUGS=stems=stemulate-multistem,mapping=stemulate-harmony-beats,sections=stemulate-song-sections
@@ -71,6 +78,10 @@ origin to `storage.cors.json` first:
 ```sh
 gcloud storage buckets update gs://stem-ulate.firebasestorage.app --cors-file=storage.cors.json
 ```
+
+The CORS policy exposes `Accept-Ranges`, `Content-Range`, and `ETag` so Safari
+can fetch only the AAC byte windows it needs. Preview files remain denied by
+Storage Rules and are opened only with six-hour signed URLs.
 
 Set the matching custom claim used by Firestore and Storage Rules. The helper
 uses Application Default Credentials and preserves existing custom claims:
@@ -112,9 +123,11 @@ firebase deploy --only firestore,storage,functions
 The first deployment may prompt to enable Cloud Functions, Cloud Run, Eventarc,
 Pub/Sub, Cloud Build, Artifact Registry, Cloud Tasks, Secret Manager, and IAM
 Credentials APIs. Firebase creates queues for task functions, but the downloader
-uses the separate pre-created `stemulate-downloads` queue. Its Firestore outbox
-trigger needs `roles/cloudtasks.enqueuer` and permission to act as the dedicated
-task-invoker service account. Exact IAM commands are in the downloader README.
+and preview workers use the separate pre-created `stemulate-downloads` and
+`stemulate-previews` queues. Their enqueue triggers need
+`roles/cloudtasks.enqueuer` and permission to act as each dedicated task-invoker
+service account. Exact service IAM commands are in the respective worker
+READMEs.
 
 Creating the V4 signed source URL requires the runtime service account to sign
 blobs. If `signBlob` is denied, enable the IAM Service Account Credentials API
@@ -132,8 +145,14 @@ guessing its address.
 3. Listen to `users/{uid}/jobs/{jobId}`. Status progresses through
    `awaiting_upload`, `queued`, `processing`, and `completed` or `failed`.
 4. On completion, call the App Check-protected `getProcessingOutputs` callable.
-   It returns owner-only signed playback URLs that expire after six hours; no
-permanent Firebase download token is attached to the stored output.
+   It returns owner-only signed original-output URLs that expire after six
+   hours; no permanent Firebase download token is attached to the stored output.
+5. New completed jobs automatically queue synchronized AAC previews. For an
+   older completed job, call `requestProcessingPreview` with `{ jobId }`.
+6. Call `getProcessingPreview` with `{ jobId }`. It returns
+   `unavailable`, `queued`, `processing`, `retrying`, `awaiting_finalize`,
+   `failed`, or `ready`. A ready response contains the validated v1 manifest and no more
+   than nine signed `.aac` URLs, each expiring after six hours.
 
 For a remote source, call `createRemoteProcessingJob` with `{ url,
 clientRequestId, rightsConfirmed: true }`. `clientRequestId` must be one browser-
@@ -171,6 +190,16 @@ The backend stores Music.ai IDs and temporary source/output URLs only in
 - Output-copy tasks are deterministic and idempotent by output key. A permanently
   unreachable Music.ai result is retried with backoff and then moves the public
   job to a visible failed state.
+- Preview generation is a secondary lifecycle. Queue, transcode, or manifest
+  failures update only `previewStatus`/`previewError`; the processing job stays
+  `completed` and its original outputs remain downloadable. A manual preview
+  request retries a failed or legacy completed job with a new task attempt.
+- The preview worker writes only beneath
+  `users/{uid}/jobs/{jobId}/streams/v1/attempt-{attempt}/` and uploads
+  `manifest.json` last. Every retry gets a new immutable generation. The
+  Storage finalizer validates the fixed AAC-LC/ADTS/48 kHz contract, canonical
+  stem IDs, complete frame/byte windows, active attempt, private object paths,
+  sizes, and MIME types before marking the preview ready.
 - Inputs and outputs are retained. Add a deliberate cleanup callable or Storage
   lifecycle policy once the desired retention period is known.
 - Before using a custom site origin, add it to `CALLABLE_CORS` in

@@ -59,6 +59,14 @@ import {
   type StemLoadProgress,
 } from "./lib/stemTransport";
 import {
+  type StemPreviewManifest,
+  type StreamingStemDeck,
+} from "./lib/stemPreviewManifest";
+import {
+  StreamingStemTransport,
+  type StreamingLoadProgress,
+} from "./lib/streamingStemTransport";
+import {
   initialStemStates,
   isAudioStemId,
 } from "./lib/stems";
@@ -69,11 +77,17 @@ import {
   stemStatesForSelection,
   type StemSelection,
 } from "./lib/stemSelection";
+import {
+  WorkerWavRangeWindowDecoder,
+  probeWavRangeStreamingDeck,
+} from "./lib/wavRangeStreaming";
 import type { SongLibraryItem } from "./lib/songLibrary";
 import type {
   AnalysisData,
+  AudioStemId,
   BeatEvent,
   ChordEvent,
+  CompletedJobResult,
   ProcessingStage,
   SectionEvent,
   StemId,
@@ -154,6 +168,10 @@ const WAVEFORM = Array.from({ length: 116 }, (_, index) => {
 const FILE_STAGE_ORDER: ProcessingStage[] = ["upload", "analyze", "split", "ready"];
 const REMOTE_STAGE_ORDER: ProcessingStage[] = ["download", "analyze", "split", "ready"];
 const REMOTE_RESUME_BACKOFF_MS = [1_000, 3_000, 10_000, 30_000, 60_000] as const;
+const PREVIEW_POLL_MAX_MS = 15 * 60 * 1000;
+const PREVIEW_POLL_MAX_DELAY_MS = 15_000;
+const PREVIEW_URL_REFRESH_LEAD_MS = 30 * 60 * 1000;
+const PREVIEW_REQUEST_MAX_ATTEMPTS = 3;
 const SUPPORTED_MEDIA_EXTENSION = /\.(aac|aif|aiff|flac|m4a|m4v|mov|mp3|mp4|ogg|opus|wav)$/i;
 function preferredScrollBehavior(): ScrollBehavior {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
@@ -162,6 +180,39 @@ function preferredScrollBehavior(): ScrollBehavior {
 function isSupportedMediaFile(file: File) {
   return SUPPORTED_MEDIA_EXTENSION.test(file.name);
 }
+
+function selectedPreviewDeck(
+  manifest: StemPreviewManifest | null,
+  sources: StemSources,
+): StreamingStemDeck | null {
+  if (!manifest) return null;
+  const selectedIds = Object.keys(sources).filter(
+    (id): id is AudioStemId => isAudioStemId(id as StemId),
+  );
+  if (
+    selectedIds.length === 0
+    || selectedIds.some((id) => !manifest.stems[id])
+  ) return null;
+  return {
+    ...manifest,
+    stems: Object.fromEntries(
+      selectedIds.map((id) => [id, manifest.stems[id]!]),
+    ),
+  };
+}
+
+type PracticeTransport = StemTransport | StreamingStemTransport;
+type PracticeTransportMode = "aac" | "wav" | "full";
+type PracticeTransportSnapshot = {
+  status: string;
+  currentTime: number;
+  error: Error | null;
+  contextState: AudioContextState | "interrupted" | "uninitialized";
+};
+type PendingPreview = {
+  manifest: StemPreviewManifest;
+  expiresAt: number;
+};
 
 function formatTime(value: number) {
   if (!Number.isFinite(value) || value < 0) return "00:00";
@@ -544,6 +595,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeView, setActiveView] = useState<"library" | "mixer" | "practice">("library");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [previewManifest, setPreviewManifest] = useState<StemPreviewManifest | null>(null);
   const [stemSelection, setStemSelection] = useState<StemSelection>(() => loadStemSelection());
   const [playbackRate, setPlaybackRate] = useState(1);
   const [pitch, setPitch] = useState(0);
@@ -566,13 +618,28 @@ export default function App() {
   const [remoteResumeTrigger, setRemoteResumeTrigger] = useState(0);
   const [remoteRecoveryPending, setRemoteRecoveryPending] = useState(false);
 
-  const stemTransport = useRef<StemTransport | null>(null);
+  const stemTransport = useRef<PracticeTransport | null>(null);
   const audioLoadController = useRef<AbortController | null>(null);
   const audioLoadPromise = useRef<Promise<unknown> | null>(null);
   const localObjectUrl = useRef<string | null>(null);
   const processingController = useRef<AbortController | null>(null);
   const remoteResumeTimer = useRef<number | null>(null);
   const remoteResumeFailures = useRef(0);
+  const pendingPreviewManifest = useRef<PendingPreview | null>(null);
+  const disabledAacManifest = useRef<StemPreviewManifest | null>(null);
+  const disabledWavSources = useRef<StemSources | null>(null);
+  const retriedAacManifest = useRef<StemPreviewManifest | null>(null);
+  const retriedWavSources = useRef<StemSources | null>(null);
+  const pendingTransportPosition = useRef<number | null>(null);
+  const pendingAudioSourceRefresh = useRef<StemSources | null>(null);
+  const mediaRequestGeneration = useRef(0);
+  const activeJobIdRef = useRef(activeJobId);
+  const audioSourcesRef = useRef(audioSources);
+  const isPlayingRef = useRef(isPlaying);
+  const currentTimeRef = useRef(currentTime);
+  const stemsRef = useRef(stems);
+  const playbackRateRef = useRef(playbackRate);
+  const [audioReloadTrigger, setAudioReloadTrigger] = useState(0);
   const loopRef = useRef({ enabled: loopEnabled, start: loopStart, end: loopEnd });
   const lastBeatIndex = useRef(-1);
   const countInToken = useRef(0);
@@ -582,7 +649,14 @@ export default function App() {
   const controlDockRef = useRef<HTMLDivElement>(null);
   const bottomNavRef = useRef<HTMLElement>(null);
 
-  const getStemTransport = useCallback(() => {
+  isPlayingRef.current = isPlaying;
+  currentTimeRef.current = currentTime;
+  activeJobIdRef.current = activeJobId;
+  audioSourcesRef.current = audioSources;
+  stemsRef.current = stems;
+  playbackRateRef.current = playbackRate;
+
+  const getStemTransport = useCallback((): PracticeTransport => {
     if (!stemTransport.current || stemTransport.current.getSnapshot().status === "disposed") {
       stemTransport.current = new StemTransport();
     }
@@ -668,6 +742,119 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    let timeout: number | null = null;
+    let pollAttempt = 0;
+    let requestAttempts = 0;
+    let previousStatus: string | null = null;
+    let cycleStartedAt = Date.now();
+    pendingPreviewManifest.current = null;
+    setPreviewManifest(null);
+    if (!backendConfigured || !activeJobId || !userUid) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const scheduleCheck = (delay: number, resetCycle = false) => {
+      if (timeout !== null) window.clearTimeout(timeout);
+      timeout = window.setTimeout(() => {
+        timeout = null;
+        if (resetCycle) {
+          pollAttempt = 0;
+          cycleStartedAt = Date.now();
+        }
+        void check();
+      }, delay);
+    };
+
+    const check = async () => {
+      try {
+        const { getOrRequestProcessingPreview } = await import("./lib/musicAi");
+        const requestIfMissing = requestAttempts < PREVIEW_REQUEST_MAX_ATTEMPTS
+          && (pollAttempt === 0 || previousStatus === "unavailable");
+        if (requestIfMissing) requestAttempts += 1;
+        const preview = await getOrRequestProcessingPreview(activeJobId, {
+          requestIfMissing,
+        });
+        if (cancelled) return;
+        if (preview.status === "ready" && preview.manifest) {
+          const pending = {
+            manifest: preview.manifest,
+            expiresAt: preview.expiresAt ?? Date.now(),
+          };
+          if (!isPlayingRef.current) {
+            pendingTransportPosition.current = currentTimeRef.current;
+            setPreviewManifest(preview.manifest);
+            pendingPreviewManifest.current = null;
+          } else {
+            pendingPreviewManifest.current = pending;
+          }
+          previousStatus = "ready";
+          const refreshDelay = Math.max(
+            60_000,
+            pending.expiresAt - Date.now() - PREVIEW_URL_REFRESH_LEAD_MS,
+          );
+          scheduleCheck(refreshDelay, true);
+          return;
+        }
+        previousStatus = preview.status;
+        const retryableUnavailable = preview.status !== "unavailable"
+          || !preview.error
+          || /(?:unavailable|deadline|internal|unknown|network)/i.test(
+            preview.error.code,
+          );
+        if (
+          !retryableUnavailable
+          ||
+          !["unavailable", "queued", "processing", "retrying", "awaiting_finalize"].includes(
+            preview.status,
+          )
+          || Date.now() - cycleStartedAt >= PREVIEW_POLL_MAX_MS
+        ) return;
+        const delay = Math.min(
+          PREVIEW_POLL_MAX_DELAY_MS,
+          1_500 * (2 ** Math.min(pollAttempt, 4)),
+        );
+        pollAttempt += 1;
+        scheduleCheck(delay);
+      } catch {
+        // Original signed WAV playback remains available while a bounded retry
+        // handles a transient callable or connectivity failure.
+        previousStatus = "unavailable";
+        if (Date.now() - cycleStartedAt < PREVIEW_POLL_MAX_MS) {
+          const delay = Math.min(
+            PREVIEW_POLL_MAX_DELAY_MS,
+            1_500 * (2 ** Math.min(pollAttempt, 4)),
+          );
+          pollAttempt += 1;
+          scheduleCheck(delay);
+        }
+      }
+    };
+    void check();
+
+    return () => {
+      cancelled = true;
+      if (timeout !== null) window.clearTimeout(timeout);
+    };
+  }, [activeJobId, userUid]);
+
+  useEffect(() => {
+    if (isPlaying || !pendingPreviewManifest.current) return;
+    pendingTransportPosition.current = currentTime;
+    setPreviewManifest(pendingPreviewManifest.current.manifest);
+    pendingPreviewManifest.current = null;
+  }, [currentTime, isPlaying]);
+
+  useEffect(() => {
+    if (isPlaying || !pendingAudioSourceRefresh.current) return;
+    pendingTransportPosition.current = currentTime;
+    setAudioSources(pendingAudioSourceRefresh.current);
+    pendingAudioSourceRefresh.current = null;
+  }, [currentTime, isPlaying]);
+
   useEffect(() => () => {
     clearRemoteResumeTimer();
     remoteResumeFailures.current = 0;
@@ -689,54 +876,229 @@ export default function App() {
   }, [loopEnabled, loopStart, loopEnd]);
 
   useEffect(() => {
+    const requestedPosition = pendingTransportPosition.current;
+    pendingTransportPosition.current = null;
     countInToken.current += 1;
     countInActive.current = false;
     setIsCountingIn(false);
     setCountdownBeat(null);
+    isPlayingRef.current = false;
     setIsPlaying(false);
-    setCurrentTime(0);
+    setCurrentTime(requestedPosition ?? 0);
     audioLoadController.current?.abort();
+    const previousTransport = stemTransport.current;
+    previousTransport?.dispose();
+    if (stemTransport.current === previousTransport) stemTransport.current = null;
     const controller = new AbortController();
     audioLoadController.current = controller;
-    const transport = getStemTransport();
     const hasSources = Object.values(audioSources).some(Boolean);
     if (!hasSources) {
-      transport.unload();
       audioLoadPromise.current = null;
       setAudioLoadStatus("idle");
       setAudioLoadDetail("");
       return () => controller.abort();
     }
 
+    let installedTransport: PracticeTransport | null = null;
+    let unsubscribeEnded: () => void = () => undefined;
+    let unsubscribeSnapshot: () => void = () => undefined;
+    let runtimeReady = false;
+    const installTransport = <T extends PracticeTransport>(
+      transport: T,
+      mode: PracticeTransportMode,
+    ): T => {
+      if (controller.signal.aborted) {
+        transport.dispose();
+        throw new DOMException("Aborted", "AbortError");
+      }
+      unsubscribeEnded();
+      unsubscribeSnapshot();
+      runtimeReady = false;
+      const previous = stemTransport.current;
+      if (previous && previous !== transport) previous.dispose();
+      stemTransport.current = transport;
+      installedTransport = transport;
+      transport.setMix(stemsRef.current);
+      transport.setPlaybackRate(playbackRateRef.current);
+      unsubscribeEnded = transport.onEnded(() => {
+        if (stemTransport.current !== transport) return;
+        setCurrentTime(transport.getCurrentTime());
+        setIsPlaying(false);
+        lastBeatIndex.current = -1;
+      });
+      unsubscribeSnapshot = transport.subscribe((
+        snapshot: PracticeTransportSnapshot,
+      ) => {
+        if (stemTransport.current !== transport || controller.signal.aborted) return;
+        if (snapshot.contextState === "interrupted" && isPlayingRef.current) {
+          const interruptedAt = snapshot.currentTime;
+          isPlayingRef.current = false;
+          transport.pause();
+          setCurrentTime(interruptedAt);
+          setIsPlaying(false);
+          setToast("iPhone audio was interrupted. Tap Play to resume from the same spot.");
+          return;
+        }
+        if (!runtimeReady || snapshot.status !== "error") return;
+        runtimeReady = false;
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+        setCurrentTime(snapshot.currentTime);
+        pendingTransportPosition.current = snapshot.currentTime;
+        const message = snapshot.error?.message
+          || "The current audio stream stopped unexpectedly.";
+        if (mode === "aac") {
+          setAudioLoadStatus("loading");
+          if (retriedAacManifest.current !== previewManifest) {
+            retriedAacManifest.current = previewManifest;
+            setAudioLoadDetail("Compressed stream interrupted · reconnecting once");
+            setToast("Compressed stream interrupted. Reconnecting…");
+          } else {
+            retriedAacManifest.current = null;
+            disabledAacManifest.current = previewManifest;
+            setAudioLoadDetail("Compressed stream interrupted · switching to WAV ranges");
+            setToast("Compressed stream interrupted. Switching playback source…");
+          }
+          setAudioReloadTrigger((value) => value + 1);
+        } else if (mode === "wav") {
+          setAudioLoadStatus("loading");
+          if (retriedWavSources.current !== audioSources) {
+            retriedWavSources.current = audioSources;
+            setAudioLoadDetail("WAV stream interrupted · reconnecting once");
+            setToast("WAV stream interrupted. Reconnecting…");
+          } else {
+            retriedWavSources.current = null;
+            disabledWavSources.current = audioSources;
+            setAudioLoadDetail("WAV stream interrupted · preparing full-buffer fallback");
+            setToast("WAV stream interrupted. Switching playback source…");
+          }
+          setAudioReloadTrigger((value) => value + 1);
+        } else {
+          setAudioLoadStatus("error");
+          setAudioLoadDetail(message);
+          setToast(message);
+        }
+      });
+      return transport;
+    };
+
     setAudioLoadStatus("loading");
-    setAudioLoadDetail("Preparing one synchronized audio clock");
-    const load = transport.load(audioSources, {
-      signal: controller.signal,
-      onProgress: (progress: StemLoadProgress) => {
-        if (controller.signal.aborted) return;
-        const action = progress.phase === "fetching"
-          ? "Loading"
-          : progress.phase === "decoding"
-            ? "Decoding"
-            : "Ready";
-        setAudioLoadDetail(`${action} ${progress.id} · ${progress.index}/${progress.total}`);
-      },
-    });
+    setAudioLoadDetail("Preparing range-streamed synchronized audio");
+    const load = (async () => {
+      const previewDeck = previewManifest !== disabledAacManifest.current
+        ? selectedPreviewDeck(previewManifest, audioSources)
+        : null;
+      if (previewDeck) {
+        let transport: StreamingStemTransport | null = null;
+        try {
+          transport = installTransport(new StreamingStemTransport(), "aac");
+          const result = await transport.load(previewDeck, {
+            signal: controller.signal,
+            onProgress: (progress: StreamingLoadProgress) => {
+              if (controller.signal.aborted) return;
+              setAudioLoadDetail(
+                `Buffering compressed preview · ${progress.windowsReady}/${progress.totalWindows}`,
+              );
+            },
+          });
+          runtimeReady = true;
+          if (retriedAacManifest.current !== previewManifest) {
+            retriedAacManifest.current = null;
+          }
+          return {
+            result,
+            transport,
+            detail: `${result.loadedStemIds.length} AAC stems range-streamed and sample-locked`,
+          };
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          retriedAacManifest.current = null;
+          disabledAacManifest.current = previewManifest;
+          if (transport && stemTransport.current === transport) {
+            unsubscribeEnded();
+            unsubscribeSnapshot();
+            transport.dispose();
+            stemTransport.current = null;
+            installedTransport = null;
+          }
+        }
+      }
+
+      if (audioSources !== disabledWavSources.current) {
+        try {
+          setAudioLoadDetail("Reading compact WAV headers for range streaming");
+          const wav = await probeWavRangeStreamingDeck(audioSources, {
+            signal: controller.signal,
+          });
+          const transport = installTransport(new StreamingStemTransport({
+            decoderFactory: () => new WorkerWavRangeWindowDecoder(wav.metadata),
+          }), "wav");
+          const result = await transport.load(wav.deck, {
+            signal: controller.signal,
+            onProgress: (progress: StreamingLoadProgress) => {
+              if (controller.signal.aborted) return;
+              setAudioLoadDetail(
+                `Buffering WAV ranges · ${progress.windowsReady}/${progress.totalWindows}`,
+              );
+            },
+          });
+          runtimeReady = true;
+          if (retriedWavSources.current !== audioSources) {
+            retriedWavSources.current = null;
+          }
+          return {
+            result,
+            transport,
+            detail: `${result.loadedStemIds.length} WAV stems range-streamed and sample-locked`,
+          };
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          retriedWavSources.current = null;
+          disabledWavSources.current = audioSources;
+        }
+      }
+
+      const transport = installTransport(new StemTransport(), "full");
+      setAudioLoadDetail("Range streaming unavailable · preparing full-buffer fallback");
+      const result = await transport.load(audioSources, {
+        signal: controller.signal,
+        onProgress: (progress: StemLoadProgress) => {
+          if (controller.signal.aborted) return;
+          const action = progress.phase === "fetching"
+            ? "Loading"
+            : progress.phase === "decoding"
+              ? "Decoding"
+              : "Ready";
+          setAudioLoadDetail(`${action} ${progress.id} · ${progress.index}/${progress.total}`);
+        },
+      });
+      runtimeReady = true;
+      return {
+        result,
+        transport,
+        detail: `${result.loadedStemIds.length} stems fully decoded and sample-locked`,
+      };
+    })();
     audioLoadPromise.current = load;
     void load.then(
-      (result) => {
+      ({ result, transport, detail }) => {
         if (controller.signal.aborted || audioLoadPromise.current !== load) return;
         setDuration(result.duration);
-        setCurrentTime(0);
+        const loadedPosition = Math.min(
+          result.duration,
+          Math.max(0, requestedPosition ?? 0),
+        );
         // Loading clamps loop points to the new buffer duration. Reapply the
         // UI's requested range so replacing a short song with a longer one
         // does not leave the transport stuck with the old shortened loop.
         transport.setLoop(loopRef.current);
+        transport.seek(loadedPosition);
+        setCurrentTime(transport.getCurrentTime());
         setAnalysis((current) => Object.keys(current.stems).length
           ? current
           : demoAnalysis(result.duration));
         setAudioLoadStatus("ready");
-        setAudioLoadDetail(`${result.loadedStemIds.length} stems sample-locked`);
+        setAudioLoadDetail(detail);
       },
       (error) => {
         if (controller.signal.aborted || audioLoadPromise.current !== load) return;
@@ -749,9 +1111,19 @@ export default function App() {
 
     return () => {
       controller.abort();
+      unsubscribeEnded();
+      unsubscribeSnapshot();
+      if (installedTransport && stemTransport.current === installedTransport) {
+        installedTransport.dispose();
+        stemTransport.current = null;
+      }
       if (audioLoadController.current === controller) audioLoadController.current = null;
     };
-  }, [audioSources, getStemTransport]);
+  // Mixer/rate/loop values are applied to each newly installed transport and
+  // then kept current by their dedicated effects below. Reloading audio on
+  // every fader move would defeat the bounded streaming cache.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audioReloadTrigger, audioSources, previewManifest]);
 
   useEffect(() => {
     getStemTransport().setMix(stems);
@@ -772,25 +1144,18 @@ export default function App() {
   }, [getStemTransport, hasAudioSources, loopEnabled, loopStart, loopEnd]);
 
   useEffect(() => {
-    const transport = getStemTransport();
-    const unsubscribeEnded = transport.onEnded(() => {
-      setCurrentTime(transport.getCurrentTime());
-      setIsPlaying(false);
-      lastBeatIndex.current = -1;
-    });
     return () => {
-      unsubscribeEnded();
       audioLoadController.current?.abort();
       audioLoadController.current = null;
       audioLoadPromise.current = null;
-      transport.dispose();
-      if (stemTransport.current === transport) stemTransport.current = null;
+      stemTransport.current?.dispose();
+      stemTransport.current = null;
       if (localObjectUrl.current) {
         URL.revokeObjectURL(localObjectUrl.current);
         localObjectUrl.current = null;
       }
     };
-  }, [getStemTransport]);
+  }, []);
 
   useEffect(() => {
     if (!isPlaying || hasAudioSources) return;
@@ -1016,7 +1381,11 @@ export default function App() {
       } = await import("./lib/audioExport");
       const baseName = safeFileBase(trackTitle);
       const blob = kind === "mix"
-        ? await renderMixWav(audioSources, stems, setExportProgress)
+        ? await renderMixWav(
+          selectStemSources(analysis.stems, stemSelection),
+          stems,
+          setExportProgress,
+        )
         : await packageStemsZip(analysis.stems, trackTitle, setExportProgress);
       setExportProgress("Opening export");
       const disposition = await shareOrDownload(
@@ -1037,7 +1406,7 @@ export default function App() {
     }
   };
 
-  const applyResult = (result: AnalysisData) => {
+  const applyResult = (result: AnalysisData, preserveActivePlayback = false) => {
     setAnalysis({
       bpm: result.bpm,
       key: result.key,
@@ -1047,18 +1416,42 @@ export default function App() {
       stems: result.stems,
     });
     if (Object.values(result.stems).some(Boolean)) {
-      setAudioSources(selectStemSources(result.stems, stemSelection));
+      const nextSources = selectStemSources(result.stems, stemSelection);
+      const hasActiveSources = Object.values(audioSourcesRef.current).some(Boolean);
+      if (preserveActivePlayback && hasActiveSources && isPlayingRef.current) {
+        pendingAudioSourceRefresh.current = nextSources;
+      } else {
+        if (preserveActivePlayback && hasActiveSources) {
+          pendingTransportPosition.current = currentTimeRef.current;
+        }
+        pendingAudioSourceRefresh.current = null;
+        setAudioSources(nextSources);
+      }
       setStems((current) => stemStatesForSelection(result.stems, stemSelection, current));
     }
   };
 
+  const applyCompletedResult = (
+    result: CompletedJobResult,
+    preserveActivePlayback = false,
+  ) => {
+    applyResult(result.analysis, preserveActivePlayback);
+    activeJobIdRef.current = result.jobId;
+    setActiveJobId(result.jobId);
+  };
+
   const openSavedSong = async (song: SongLibraryItem) => {
+    const requestGeneration = ++mediaRequestGeneration.current;
+    pendingAudioSourceRefresh.current = null;
+    pendingPreviewManifest.current = null;
+    processingController.current?.abort();
+    processingController.current = null;
     setToast(`Opening ${song.title}…`);
     try {
       const { loadProcessingJob } = await import("./lib/musicAi");
       const result = await loadProcessingJob(song.id);
-      applyResult(result.analysis);
-      setActiveJobId(song.id);
+      if (requestGeneration !== mediaRequestGeneration.current) return;
+      applyCompletedResult(result);
       setTrackTitle(result.displayName?.trim() || song.title);
       setTrackSource(result.sourceProvider === "spotify"
         ? "Spotify track · spotDL → YouTube Music · Music.ai"
@@ -1072,6 +1465,7 @@ export default function App() {
       setActiveView("mixer");
       window.requestAnimationFrame(() => scrollTo("mixer"));
     } catch (error) {
+      if (requestGeneration !== mediaRequestGeneration.current) return;
       setToast(error instanceof Error ? error.message : "The saved song could not be opened.");
     }
   };
@@ -1089,6 +1483,9 @@ export default function App() {
     ) return;
     const controller = new AbortController();
     processingController.current = controller;
+    const requestGeneration = mediaRequestGeneration.current;
+    const jobAtStart = activeJobIdRef.current;
+    const hadSourcesAtStart = Object.values(audioSourcesRef.current).some(Boolean);
     let musicAi: typeof import("./lib/musicAi") | null = null;
     void (async () => {
       musicAi = await import("./lib/musicAi");
@@ -1096,24 +1493,36 @@ export default function App() {
       if (!musicAi.hasPendingRemoteTrack()) {
         resetRemoteResume();
         const restored = await musicAi.refreshLatestOutputs(true).catch(() => null);
-        if (!restored || controller.signal.aborted) return;
-        applyResult(restored.analysis);
+        if (
+          !restored
+          || controller.signal.aborted
+          || requestGeneration !== mediaRequestGeneration.current
+          || (
+            hadSourcesAtStart
+            && restored.jobId !== jobAtStart
+          )
+        ) return;
+        applyCompletedResult(restored, true);
         if (restored.displayName) setTrackTitle(restored.displayName);
         setTrackSource(restored.sourceProvider === "spotify"
           ? "Spotify track · spotDL → YouTube Music · Music.ai"
           : restored.sourceProvider === "youtube"
             ? "YouTube track · yt-dlp · Music.ai"
             : "Restored Music.ai session");
-        seek(0);
+        if (!hadSourcesAtStart) seek(0);
         return;
       }
 
       setRemoteRecoveryPending(true);
       setProcessingMode("remote");
       const resumed = await musicAi.resumeRemoteTrack(onStage, controller.signal);
-      if (!resumed || controller.signal.aborted) return;
+      if (
+        !resumed
+        || controller.signal.aborted
+        || requestGeneration !== mediaRequestGeneration.current
+      ) return;
       resetRemoteResume();
-      applyResult(resumed.analysis);
+      applyCompletedResult(resumed);
       setTrackTitle(resumed.title);
       setTrackSource(resumed.source);
       seek(0);
@@ -1144,6 +1553,9 @@ export default function App() {
     let disposed = false;
     const wake = () => {
       if (document.visibilityState !== "visible" || !navigator.onLine || processingController.current) return;
+      const requestGeneration = mediaRequestGeneration.current;
+      const jobAtStart = activeJobIdRef.current;
+      const hadSourcesAtStart = Object.values(audioSourcesRef.current).some(Boolean);
       void import("./lib/musicAi")
         .then(async ({ hasPendingRemoteTrack, refreshLatestOutputs }) => {
           if (disposed) return null;
@@ -1154,7 +1566,12 @@ export default function App() {
           return refreshLatestOutputs(false);
         })
         .then((result) => {
-          if (!disposed && result) applyResult(result.analysis);
+          if (
+            !disposed
+            && result
+            && requestGeneration === mediaRequestGeneration.current
+            && (!hadSourcesAtStart || result.jobId === jobAtStart)
+          ) applyCompletedResult(result, true);
         })
         .catch(() => undefined);
     };
@@ -1189,6 +1606,10 @@ export default function App() {
   };
 
   const handleFile = async (file: File) => {
+    mediaRequestGeneration.current += 1;
+    pendingAudioSourceRefresh.current = null;
+    pendingPreviewManifest.current = null;
+    pendingTransportPosition.current = null;
     processingController.current?.abort();
     const controller = new AbortController();
     processingController.current = controller;
@@ -1197,6 +1618,9 @@ export default function App() {
     if (backendConfigured) setActiveView("library");
     setTrackTitle(file.name.replace(/\.[^.]+$/, ""));
     setTrackSource(`${file.type || "audio file"} · local preview`);
+    activeJobIdRef.current = null;
+    setActiveJobId(null);
+    setPreviewManifest(null);
     if (localObjectUrl.current) URL.revokeObjectURL(localObjectUrl.current);
     localObjectUrl.current = URL.createObjectURL(file);
     setAudioSources({ other: localObjectUrl.current });
@@ -1206,7 +1630,8 @@ export default function App() {
     try {
       if (backendConfigured) {
         const { analyzeFile } = await import("./lib/musicAi");
-        applyResult(await analyzeFile(file, onStage, controller.signal));
+        const result = await analyzeFile(file, onStage, controller.signal);
+        applyCompletedResult(result);
         setToast(`${file.name.replace(/\.[^.]+$/, "")} is ready in your library.`);
       } else await simulateAnalysis(file.name);
     } catch (error) {
@@ -1236,19 +1661,26 @@ export default function App() {
       return;
     }
     resetRemoteResume();
+    mediaRequestGeneration.current += 1;
+    pendingAudioSourceRefresh.current = null;
+    pendingPreviewManifest.current = null;
+    pendingTransportPosition.current = null;
     processingController.current?.abort();
     const controller = new AbortController();
     processingController.current = controller;
     setProcessingMode("remote");
     setImportOpen(false);
     setActiveView("library");
+    activeJobIdRef.current = null;
+    setActiveJobId(null);
+    setPreviewManifest(null);
     onStage("download", "Preparing the private download job");
     let musicAi: typeof import("./lib/musicAi") | null = null;
     try {
       musicAi = await import("./lib/musicAi");
       const result = await musicAi.analyzeRemoteTrack(url, onStage, controller.signal);
       resetRemoteResume();
-      applyResult(result.analysis);
+      applyCompletedResult(result);
       setTrackTitle(result.title);
       setTrackSource(result.source);
       seek(0);
@@ -1270,9 +1702,18 @@ export default function App() {
 
   const toggleLoopForSection = (section: SectionEvent) => {
     const alreadySelected = loopEnabled && Math.abs(loopStart - section.start) < 0.1 && Math.abs(loopEnd - section.end) < 0.1;
+    const nextLoop = {
+      enabled: !alreadySelected,
+      start: section.start,
+      end: section.end,
+    };
+    loopRef.current = nextLoop;
+    if (hasAudioSources) {
+      getStemTransport().setLoop(nextLoop);
+    }
     setLoopStart(section.start);
     setLoopEnd(section.end);
-    setLoopEnabled(!alreadySelected);
+    setLoopEnabled(nextLoop.enabled);
     if (!alreadySelected) seek(section.start);
   };
 

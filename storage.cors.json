@@ -8,7 +8,16 @@
       "http://127.0.0.1:5173"
     ],
     "method": ["GET", "HEAD"],
-    "responseHeader": ["Content-Type", "Content-Length", "Accept-Ranges"],
+    "responseHeader": [
+      "Content-Type",
+      "Content-Length",
+      "Range",
+      "Accept-Ranges",
+      "Content-Range",
+      "ETag",
+      "Last-Modified",
+      "Cache-Control"
+    ],
     "maxAgeSeconds": 3600
   }
 ]

@@ -119,6 +119,24 @@ export const DOWNLOADER_INVOKER_SERVICE_ACCOUNT = defineString(
   },
 );
 
+export const PREVIEW_SERVICE_URL = defineString("PREVIEW_SERVICE_URL", {
+  default: "https://replace-with-private-preview-service.run.app",
+  description: "Base URL of the private STEMulate AAC preview Cloud Run service.",
+});
+
+export const PREVIEW_QUEUE_ID = defineString("PREVIEW_QUEUE_ID", {
+  default: "stemulate-previews",
+  description: "Cloud Tasks queue used for synchronized AAC preview generation.",
+});
+
+export const PREVIEW_INVOKER_SERVICE_ACCOUNT = defineString(
+  "PREVIEW_INVOKER_SERVICE_ACCOUNT",
+  {
+    default: "replace-with-preview-invoker@stem-ulate.iam.gserviceaccount.com",
+    description: "Service account Cloud Tasks uses to invoke the private preview service.",
+  },
+);
+
 export const REMOTE_IMPORT_MAX_BYTES = defineInt("REMOTE_IMPORT_MAX_BYTES", {
   default: 104_857_600,
   description: "Maximum normalized audio size accepted from yt-dlp or spotDL.",

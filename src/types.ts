@@ -46,8 +46,15 @@ export type AnalysisData = {
 
 export type RemoteSourceProvider = "youtube" | "spotify";
 
-export type RemoteTrackResult = {
+export type CompletedJobResult = {
   analysis: AnalysisData;
+  jobId: string;
+  outputsExpireAt: number;
+  displayName?: string;
+  sourceProvider?: RemoteSourceProvider;
+};
+
+export type RemoteTrackResult = CompletedJobResult & {
   title: string;
   source: string;
   provider: RemoteSourceProvider;
