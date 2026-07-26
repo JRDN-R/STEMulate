@@ -1,4 +1,5 @@
 import AVFAudio
+import AudioToolbox
 import Combine
 import Darwin
 import Foundation
@@ -99,7 +100,7 @@ final class NativeStemAudioEngine: NSObject, ObservableObject {
     private var stemBus = AVAudioMixerNode()
     private var timePitch = AVAudioUnitTimePitch()
     private var masterBus = AVAudioMixerNode()
-    private var limiter = AVAudioUnitDynamicsProcessor()
+    private var limiter = NativeStemAudioEngine.makePeakLimiter()
     private var metronomePlayer = AVAudioPlayerNode()
     private var metronomeMixer = AVAudioMixerNode()
     private var metronomeFormat = AVAudioFormat(
@@ -561,12 +562,6 @@ final class NativeStemAudioEngine: NSObject, ObservableObject {
         timePitch.pitch = 0
         timePitch.overlap = 8
 
-        limiter.threshold = -3
-        limiter.headRoom = 0.1
-        limiter.attackTime = 0.001
-        limiter.releaseTime = 0.08
-        limiter.masterGain = 0
-
         metronomeMixer.outputVolume = 1
         applyMetronomeGainStaging()
         regularClickBuffer = makeClickBuffer(
@@ -1005,7 +1000,7 @@ final class NativeStemAudioEngine: NSObject, ObservableObject {
         stemBus = AVAudioMixerNode()
         timePitch = AVAudioUnitTimePitch()
         masterBus = AVAudioMixerNode()
-        limiter = AVAudioUnitDynamicsProcessor()
+        limiter = Self.makePeakLimiter()
         metronomePlayer = AVAudioPlayerNode()
         metronomeMixer = AVAudioMixerNode()
         runtimes = []
@@ -1091,6 +1086,16 @@ final class NativeStemAudioEngine: NSObject, ObservableObject {
             )
         }
         return buffer
+    }
+
+    private static func makePeakLimiter() -> AVAudioUnitEffect {
+        AVAudioUnitEffect(audioComponentDescription: AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: kAudioUnitSubType_PeakLimiter,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        ))
     }
 
     private func publishSnapshot() {
