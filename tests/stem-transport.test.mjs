@@ -50,6 +50,18 @@ class FakeStereoPannerNode extends FakeNode {
   pan = new FakeAudioParam();
 }
 
+class FakeDynamicsCompressorNode extends FakeNode {
+  threshold = new FakeAudioParam();
+
+  knee = new FakeAudioParam();
+
+  ratio = new FakeAudioParam();
+
+  attack = new FakeAudioParam();
+
+  release = new FakeAudioParam();
+}
+
 class FakeBufferSourceNode extends FakeNode {
   buffer = null;
 
@@ -93,6 +105,8 @@ class FakeAudioContext {
 
   panners = [];
 
+  compressors = [];
+
   sources = [];
 
   decodeDurations = [];
@@ -112,6 +126,12 @@ class FakeAudioContext {
   createStereoPanner() {
     const node = new FakeStereoPannerNode();
     this.panners.push(node);
+    return node;
+  }
+
+  createDynamicsCompressor() {
+    const node = new FakeDynamicsCompressorNode();
+    this.compressors.push(node);
     return node;
   }
 
@@ -240,6 +260,21 @@ async function loadedTransport({
   const result = await transport.load(sources);
   return { context, transport, result };
 }
+
+test("routes the shared output through a peak limiter", async () => {
+  const { context, transport } = await loadedTransport({
+    sources: { vocals: "/vocals.wav" },
+    durations: [30],
+  });
+  const limiter = context.compressors[0];
+  const output = transport.getOutputNode();
+
+  assert.equal(output, context.gains[0]);
+  assert.deepEqual(output.connections, [limiter]);
+  assert.deepEqual(limiter.connections, [context.destination]);
+  assert.equal(limiter.threshold.value, -3);
+  assert.equal(limiter.ratio.value, 20);
+});
 
 test("loads and decodes stems sequentially, using a common safe duration", async () => {
   const context = new FakeAudioContext();

@@ -1,6 +1,15 @@
+export const DRUM_PART_STEM_IDS = [
+  "kick",
+  "snare",
+  "toms",
+  "hi_hat",
+  "cymbals",
+] as const;
+
 export const AUDIO_STEM_IDS = [
   "vocals",
   "drums",
+  ...DRUM_PART_STEM_IDS,
   "bass",
   "guitars",
   "piano",
@@ -10,6 +19,7 @@ export const AUDIO_STEM_IDS = [
   "other",
 ] as const;
 
+export type DrumPartStemId = (typeof DRUM_PART_STEM_IDS)[number];
 export type AudioStemId = (typeof AUDIO_STEM_IDS)[number];
 export type StemId = AudioStemId | "metronome";
 export type StemSources = Partial<Record<AudioStemId, string>>;
@@ -33,6 +43,11 @@ export type StemPresentation = Omit<StemState, "id" | "volume" | "pan" | "muted"
 const STEM_PRESENTATION: Record<StemId, StemPresentation> = {
   vocals: { label: "Vocals", shortLabel: "VOX", volume: 84, color: "#ff625c" },
   drums: { label: "Drums", shortLabel: "DRM", volume: 78, color: "#55e4dc" },
+  kick: { label: "Kick", shortLabel: "KIK", volume: 78, color: "#36d7cf" },
+  snare: { label: "Snare", shortLabel: "SNR", volume: 76, color: "#5ce6c4" },
+  toms: { label: "Toms", shortLabel: "TOM", volume: 74, color: "#6ee0a8" },
+  hi_hat: { label: "Hi-hat", shortLabel: "HAT", volume: 70, color: "#8adf91" },
+  cymbals: { label: "Cymbals", shortLabel: "CYM", volume: 70, color: "#b1df7a" },
   bass: { label: "Bass", shortLabel: "BAS", volume: 72, color: "#7dd8ff" },
   guitars: { label: "Guitars", shortLabel: "GTR", volume: 72, color: "#ff9f68" },
   piano: { label: "Piano", shortLabel: "PNO", volume: 70, color: "#f0d58a" },
@@ -46,6 +61,12 @@ const STEM_PRESENTATION: Record<StemId, StemPresentation> = {
 const DEFAULT_AUDIO_STEMS: readonly AudioStemId[] = ["vocals", "drums", "bass", "other"];
 
 const STEM_ALIASES: ReadonlyArray<readonly [AudioStemId, readonly string[]]> = [
+  // Match specific drum components before the generic "drum" token.
+  ["kick", ["kick", "kicks", "kick_drum", "kick_drums", "kickdrum", "bass_drum"]],
+  ["snare", ["snare", "snares", "snare_drum", "snare_drums", "snaredrum"]],
+  ["toms", ["tom", "toms", "tom_drum", "tom_drums"]],
+  ["hi_hat", ["hi_hat", "hi_hats", "hihat", "hihats", "high_hat", "high_hats"]],
+  ["cymbals", ["cymbal", "cymbals"]],
   ["vocals", ["vocals", "vocal", "voice", "voices"]],
   ["drums", ["drums", "drum", "percussion"]],
   ["bass", ["bass"]],
@@ -110,7 +131,13 @@ function normalizedTokens(value: string): string[] {
 function stemIdFromHint(hint: string): AudioStemId | null {
   const tokens = normalizedTokens(hint);
   for (const [stemId, aliases] of STEM_ALIASES) {
-    if (aliases.some((alias) => tokens.includes(alias))) return stemId;
+    if (aliases.some((alias) => {
+      const aliasTokens = normalizedTokens(alias);
+      if (aliasTokens.length === 1) return tokens.includes(aliasTokens[0]);
+      return tokens.some((token, start) =>
+        aliasTokens.every((aliasToken, offset) => tokens[start + offset] === aliasToken),
+      );
+    })) return stemId;
   }
   if (tokens.some((token) => ORIGINAL_ALIASES.has(token))) return null;
   return null;

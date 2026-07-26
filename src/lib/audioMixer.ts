@@ -14,6 +14,24 @@ function clamp(value: number, minimum: number, maximum: number): number {
 }
 
 /**
+ * Returns a range control to its detent when a pointer brings it close enough.
+ * Callers intentionally apply this only during pointer/touch gestures so arrow
+ * keys can still move through every individual value.
+ */
+export function snapRangeValue(rawValue: number, target: number, radius: number): number {
+  const safeRadius = Math.max(0, radius);
+  return Math.abs(rawValue - target) <= safeRadius ? target : rawValue;
+}
+
+/**
+ * Keeps the click comfortably below full scale while giving it considerably
+ * more headroom than the old 0.18 multiplier.
+ */
+export function metronomePeakGain(volume: number, audible: boolean): number {
+  return audible ? (clamp(volume, 0, 100) / 100) * 0.45 : 0;
+}
+
+/**
  * Resolves the audible gain and normalized stereo position for every loaded
  * audio channel. Solo is evaluated across the whole deck so soloing the click
  * track correctly silences the song stems too.

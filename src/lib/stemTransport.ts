@@ -227,6 +227,8 @@ export class StemTransport {
 
   private masterGain: GainNode | null = null;
 
+  private masterLimiter: DynamicsCompressorNode | null = null;
+
   private buffers = new Map<AudioStemId, AudioBuffer>();
 
   private channels = new Map<AudioStemId, ChannelNodes>();
@@ -299,6 +301,11 @@ export class StemTransport {
   getAudioContext(): AudioContext {
     this.assertUsable();
     return this.ensureContext();
+  }
+
+  getOutputNode(): AudioNode {
+    const context = this.getAudioContext();
+    return this.ensureMasterGain(context);
   }
 
   getCurrentTime(): number {
@@ -629,6 +636,8 @@ export class StemTransport {
     this.context?.removeEventListener("statechange", this.handleContextStateChange);
     this.masterGain?.disconnect();
     this.masterGain = null;
+    this.masterLimiter?.disconnect();
+    this.masterLimiter = null;
     const context = this.context;
     this.context = null;
     this.emit();
@@ -665,7 +674,17 @@ export class StemTransport {
     if (!this.masterGain) {
       this.masterGain = context.createGain();
       this.masterGain.gain.value = 1;
-      this.masterGain.connect(context.destination);
+      if (typeof context.createDynamicsCompressor === "function") {
+        this.masterLimiter = context.createDynamicsCompressor();
+        this.masterLimiter.threshold.value = -3;
+        this.masterLimiter.knee.value = 3;
+        this.masterLimiter.ratio.value = 20;
+        this.masterLimiter.attack.value = 0.003;
+        this.masterLimiter.release.value = 0.1;
+        this.masterGain.connect(this.masterLimiter).connect(context.destination);
+      } else {
+        this.masterGain.connect(context.destination);
+      }
     }
     return this.masterGain;
   }

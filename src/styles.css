@@ -159,30 +159,11 @@ input:focus-visible {
   box-shadow: var(--shadow-panel), inset 0 0 16px rgba(255, 98, 92, 0.14), 0 0 12px rgba(255, 98, 92, 0.14);
 }
 
-.app-header {
-  position: relative;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: center;
-  min-height: 78px;
-  margin-bottom: 16px;
-}
-
-.brand-logo {
-  width: clamp(66px, 17vw, 90px);
-  aspect-ratio: 1;
-  object-fit: cover;
-  border: 1px solid #4c5557;
-  border-radius: 18%;
-  box-shadow: 0 0 26px rgba(85, 228, 220, 0.12), 0 12px 30px rgba(0, 0, 0, 0.62);
-}
-
-.brand-copy {
-  min-width: 0;
+.app-toolbar {
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  justify-content: flex-end;
+  min-height: 44px;
+  margin-bottom: 12px;
 }
 
 .eyebrow {
@@ -191,33 +172,6 @@ input:focus-visible {
   font-size: 0.75rem;
   font-weight: 800;
   letter-spacing: 0.13em;
-}
-
-.brand-copy > strong {
-  overflow: hidden;
-  color: var(--red-bright);
-  font-family: var(--font-display);
-  font-size: clamp(1.28rem, 5.4vw, 2rem);
-  font-style: italic;
-  font-weight: 900;
-  letter-spacing: -0.06em;
-  line-height: 1;
-  text-overflow: ellipsis;
-  text-shadow: 0 2px 0 #5a0d0a, 0 0 14px rgba(255, 98, 92, 0.3);
-  white-space: nowrap;
-}
-
-.brand-copy > strong span {
-  color: var(--cyan);
-  text-shadow: 0 2px 0 #073f3d, 0 0 14px rgba(85, 228, 220, 0.24);
-}
-
-.brand-copy small {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 0.75rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .menu-button {
@@ -448,6 +402,34 @@ input:focus-visible {
 
 .musical-badges b {
   color: var(--cyan-bright);
+}
+
+.mixer-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.mixer-save-button {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 4px 10px;
+  color: var(--cyan-bright);
+  font-family: var(--font-display);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.mixer-save-button:disabled {
+  cursor: default;
+  color: var(--text-dim);
+  opacity: 0.62;
 }
 
 .chord-strip {
@@ -875,6 +857,18 @@ input:focus-visible {
   box-shadow: 0 0 10px color-mix(in srgb, var(--stem-color), transparent 45%);
 }
 
+.range-detent {
+  position: absolute;
+  z-index: 2;
+  top: -2px;
+  width: 2px;
+  height: 12px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.68);
+  box-shadow: 0 0 5px rgba(255, 255, 255, 0.38);
+  transform: translateX(-1px);
+}
+
 .fader-wrap input {
   position: absolute;
   z-index: 1;
@@ -950,12 +944,31 @@ input:focus-visible {
   box-shadow: inset 0 2px 5px #000;
 }
 
-.pan-control > span {
+.pan-control > span:first-child {
   color: var(--text-dim);
   font-family: var(--font-data);
   font-size: 0.62rem;
   font-weight: 900;
   letter-spacing: 0.05em;
+}
+
+.pan-slider {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+
+.pan-detent {
+  position: absolute;
+  z-index: 1;
+  top: 7px;
+  bottom: 7px;
+  left: 50%;
+  width: 2px;
+  border-radius: 1px;
+  pointer-events: none;
+  background: rgba(255, 255, 255, 0.5);
+  transform: translateX(-1px);
 }
 
 .pan-control input {
@@ -1632,12 +1645,6 @@ input:focus-visible {
   align-items: center;
 }
 
-.about-card img {
-  width: 48px;
-  height: 48px;
-  border-radius: 10px;
-}
-
 .about-card span {
   display: flex;
   flex-direction: column;
@@ -1812,10 +1819,6 @@ input:focus-visible {
     padding-bottom: calc(242px + var(--safe-bottom));
   }
 
-  .app-header {
-    min-height: 100px;
-  }
-
   .track-panel,
   .chord-panel,
   .arrangement-panel,
@@ -1874,14 +1877,6 @@ input:focus-visible {
 @media (max-width: 390px) {
   .app-shell {
     padding-inline: 10px;
-  }
-
-  .brand-logo {
-    width: 62px;
-  }
-
-  .brand-copy small {
-    display: none;
   }
 
   .track-panel {

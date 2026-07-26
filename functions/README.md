@@ -66,6 +66,15 @@ if the list is reordered. `MUSIC_AI_WORKFLOW_SLUGS` takes precedence. For a
 single combined workflow, leave it empty and set the backward-compatible
 `MUSIC_AI_WORKFLOW_SLUG` instead.
 
+To make the Drum parts and Full mixer layouts receive separate kit channels,
+edit the saved `stemulate-multistem` workflow so the separated `drums` output
+feeds the [Drum Stems module](https://music.ai/modules/stem-separation/drum-stems/),
+then expose `kick_drum`, `snare_drum`, `toms`, `hi_hat`, and `cymbals` as
+downloadable outputs. Omit the module's sixth `other` output or give it a
+non-reserved name such as `drum_other`; the plain `other` key is reserved for
+the song-level remaining-instruments stem. This affects newly processed jobs;
+existing saved jobs keep the outputs they already produced.
+
 The Music.ai API uses the raw API key
 as its `Authorization` header; never prefix it with `Bearer` and never copy the
 key into frontend configuration. Firebase web configuration is public by design,

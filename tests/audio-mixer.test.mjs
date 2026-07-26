@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveStemMix } from "../src/lib/audioMixer.ts";
+import {
+  metronomePeakGain,
+  resolveStemMix,
+  snapRangeValue,
+} from "../src/lib/audioMixer.ts";
 import { initialStemStates } from "../src/lib/stems.ts";
 
 test("resolves fader percentages and pan to Web Audio values", () => {
@@ -35,4 +39,19 @@ test("soloing the metronome silences every audio stem", () => {
   );
 
   assert.ok(Object.values(resolveStemMix(stems)).every((channel) => channel?.gain === 0));
+});
+
+test("range detents snap only inside the requested radius", () => {
+  assert.equal(snapRangeValue(4, 0, 5), 0);
+  assert.equal(snapRangeValue(-5, 0, 5), 0);
+  assert.equal(snapRangeValue(6, 0, 5), 6);
+  assert.equal(snapRangeValue(77, 78, 3), 78);
+  assert.equal(snapRangeValue(74, 78, 3), 74);
+});
+
+test("metronome gain is louder while remaining below full scale", () => {
+  assert.equal(metronomePeakGain(62, true), 0.279);
+  assert.equal(metronomePeakGain(100, true), 0.45);
+  assert.equal(metronomePeakGain(100, false), 0);
+  assert.equal(metronomePeakGain(150, true), 0.45);
 });

@@ -220,6 +220,8 @@ export class StreamingStemTransport {
 
   private masterGain: GainNode | null = null;
 
+  private masterLimiter: DynamicsCompressorNode | null = null;
+
   private manifest: StreamingStemDeck | null = null;
 
   private windows: StemPreviewWindow[] = [];
@@ -323,6 +325,11 @@ export class StreamingStemTransport {
   getAudioContext(): AudioContext {
     this.assertUsable();
     return this.ensureContext();
+  }
+
+  getOutputNode(): AudioNode {
+    const context = this.getAudioContext();
+    return this.ensureMasterGain(context);
   }
 
   getCurrentTime(): number {
@@ -657,6 +664,8 @@ export class StreamingStemTransport {
     this.context?.removeEventListener("statechange", this.handleContextStateChange);
     this.masterGain?.disconnect();
     this.masterGain = null;
+    this.masterLimiter?.disconnect();
+    this.masterLimiter = null;
     if (this.ownsDecoder) this.decoder?.dispose();
     this.decoder = null;
     const context = this.context;
@@ -691,7 +700,17 @@ export class StreamingStemTransport {
     if (!this.masterGain) {
       this.masterGain = context.createGain();
       this.masterGain.gain.value = 1;
-      this.masterGain.connect(context.destination);
+      if (typeof context.createDynamicsCompressor === "function") {
+        this.masterLimiter = context.createDynamicsCompressor();
+        this.masterLimiter.threshold.value = -3;
+        this.masterLimiter.knee.value = 3;
+        this.masterLimiter.ratio.value = 20;
+        this.masterLimiter.attack.value = 0.003;
+        this.masterLimiter.release.value = 0.1;
+        this.masterGain.connect(this.masterLimiter).connect(context.destination);
+      } else {
+        this.masterGain.connect(context.destination);
+      }
     }
     return this.masterGain;
   }

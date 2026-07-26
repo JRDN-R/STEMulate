@@ -22,6 +22,7 @@ import {
   normalizeChords,
   normalizeSections,
 } from "./musicAnalysis";
+import { normalizeMixerSettings } from "./mixerSettings";
 import {
   remoteImportValidationMessage,
   validateRemoteImportUrl,
@@ -52,6 +53,7 @@ type PublicJob = {
   sourceProvider?: RemoteSourceProvider;
   analysis?: Record<string, unknown>;
   outputs?: PublicOutput[];
+  mixerSettings?: unknown;
   error?: { message?: string; code?: string } | null;
 };
 
@@ -149,8 +151,13 @@ function abortError() {
   return new DOMException("Aborted", "AbortError");
 }
 
+function publicProcessingError(message: string | undefined, fallback: string): string {
+  if (!message || /music\.ai/i.test(message)) return fallback;
+  return message;
+}
+
 function artifactLimitError() {
-  return new TerminalJobError("A Music.ai text artifact exceeded the 16 MiB safety limit.");
+  return new TerminalJobError("A processing result exceeded the 16 MiB safety limit.");
 }
 
 function previewError(
@@ -340,7 +347,7 @@ async function readBoundedText(response: Response): Promise<string> {
     const declaredBytes = Number(contentLength);
     if (!Number.isSafeInteger(declaredBytes) || declaredBytes < 0) {
       await response.body?.cancel().catch(() => undefined);
-      throw new TerminalJobError("A Music.ai text artifact reported an invalid size.");
+      throw new TerminalJobError("A processing result reported an invalid size.");
     }
     if (declaredBytes > MAX_REMOTE_ARTIFACT_BYTES) {
       await response.body?.cancel().catch(() => undefined);
@@ -349,7 +356,7 @@ async function readBoundedText(response: Response): Promise<string> {
   }
 
   if (!response.body) {
-    throw new TerminalJobError("This browser cannot safely stream Music.ai text artifacts.");
+    throw new TerminalJobError("This browser cannot safely stream the processing results.");
   }
 
   const reader = response.body.getReader();
@@ -574,18 +581,18 @@ function stageFor(job: PublicJob): [ProcessingStage, string] {
   switch (job.stage) {
     case "queued_for_download":
       return job.sourceProvider === "spotify"
-        ? ["download", "Matching Spotify metadata to YouTube Music with spotDL"]
-        : ["download", "Queued for an authorized yt-dlp download"];
+        ? ["download", "Matching Spotify metadata to an authorized recording"]
+        : ["download", "Queued for a private YouTube download"];
     case "downloading":
       return job.sourceProvider === "spotify"
-        ? ["download", "Downloading the spotDL match from YouTube Music"]
-        : ["download", "Downloading the authorized YouTube track with yt-dlp"];
+        ? ["download", "Preparing the matched recording"]
+        : ["download", "Downloading the authorized YouTube track"];
     case "download_retry":
       return ["download", "The source is taking longer than expected · trying again"];
     case "normalizing":
-      return ["download", "Preparing the downloaded audio for Music.ai"];
+      return ["download", "Preparing the downloaded audio for analysis"];
     case "transcoding":
-      return ["download", "Preparing the downloaded audio for Music.ai"];
+      return ["download", "Preparing the downloaded audio for analysis"];
     case "uploading_source":
       return ["download", "Securing the downloaded audio in private storage"];
     case "materializing_outputs":
@@ -593,22 +600,22 @@ function stageFor(job: PublicJob): [ProcessingStage, string] {
     case "output_retry":
       return ["split", "The stems are still arriving · checking again"];
     case "completed":
-      return ["split", "Loading the secured Music.ai outputs"];
+      return ["split", "Loading the secured processing outputs"];
     case "submitting":
-      return ["analyze", "Starting the Music.ai workflow"];
+      return ["analyze", "Starting audio analysis"];
     case "poll_retry":
-      return ["analyze", "Music.ai is still working · checking again"];
+      return ["analyze", "Analysis is still working · checking again"];
     case "analyzing":
       return ["analyze", "Analyzing beats, chords, and sections"];
     case "queued_for_analysis":
-      return ["analyze", "Queued for Music.ai"];
+      return ["analyze", "Queued for analysis"];
     default:
       if (job.sourceType === "remote" && job.status === "awaiting_upload") {
         return ["download", "Waiting for the private download worker"];
       }
       return job.status === "processing"
         ? ["split", "Separating the mix"]
-        : ["analyze", "Waiting for Music.ai"];
+        : ["analyze", "Waiting for analysis"];
   }
 }
 
@@ -684,7 +691,10 @@ function waitForJob(
         }
         if (job.status === "failed") {
           finish(() => reject(new TerminalJobError(
-            job.error?.message || "Music.ai could not process this track.",
+            publicProcessingError(
+              job.error?.message,
+              "The processing service could not process this track.",
+            ),
           )));
           return;
         }
@@ -704,6 +714,7 @@ function waitForJob(
                 outputsExpireAt: materialized.expiresAt,
                 displayName: job.displayName,
                 sourceProvider: job.sourceProvider,
+                mixerSettings: normalizeMixerSettings(job.mixerSettings),
               });
             }),
             (error) => finish(() => reject(error)),
@@ -721,11 +732,11 @@ export async function analyzeFile(
   signal?: AbortSignal,
 ): Promise<CompletedJobResult> {
   if (!backendConfigured) {
-    throw new Error("The secure Firebase backend is not configured yet.");
+    throw new Error("The secure cloud backend is not configured yet.");
   }
   const owner = getOwnerUser();
   if (!owner) {
-    throw new Error("Sign in as the owner from Settings before starting Music.ai processing.");
+    throw new Error("Sign in as the owner from Settings before processing a track.");
   }
   const contentType = inferredContentType(file);
   if (!/^(audio|video)\//i.test(contentType)) {
@@ -759,7 +770,7 @@ export async function analyzeRemoteTrack(
   signal?: AbortSignal,
 ): Promise<RemoteTrackResult> {
   if (!backendConfigured) {
-    throw new Error("Remote imports require the secure Firebase backend.");
+    throw new Error("Remote imports require the secure cloud backend.");
   }
   const owner = getOwnerUser();
   if (!owner) {
@@ -849,8 +860,8 @@ async function ensureRemoteJob(
   onStage(
     "download",
     job.provider === "spotify"
-      ? "Matching Spotify metadata to YouTube Music with spotDL"
-      : "Queued for an authorized yt-dlp download",
+      ? "Matching Spotify metadata to an authorized recording"
+      : "Queued for a private YouTube download",
   );
   return created;
 }
@@ -872,8 +883,8 @@ async function finishRemoteJob(
   const defaultTitle = provider === "spotify" ? "Spotify import" : "YouTube import";
   const title = completed.displayName?.trim() || defaultTitle;
   const source = provider === "spotify"
-    ? "Spotify track · spotDL → YouTube Music · Music.ai"
-    : "YouTube track · yt-dlp · Music.ai";
+    ? "Spotify track"
+    : "YouTube track";
 
   return {
     ...completed,
@@ -918,7 +929,7 @@ export function cancelPendingRemoteTrack(): void {
 
 export async function loadProcessingJob(jobId: string): Promise<CompletedJobResult> {
   if (!backendConfigured) {
-    throw new Error("The secure Firebase backend is not configured yet.");
+    throw new Error("The secure cloud backend is not configured yet.");
   }
   const owner = getOwnerUser();
   if (!owner) {
@@ -936,7 +947,10 @@ export async function loadProcessingJob(jobId: string): Promise<CompletedJobResu
   }
   const job = snapshot.data() as PublicJob;
   if (job.status === "failed") {
-    throw new TerminalJobError(job.error?.message || "Music.ai could not process this track.");
+    throw new TerminalJobError(publicProcessingError(
+      job.error?.message,
+      "The processing service could not process this track.",
+    ));
   }
   if (job.status !== "completed") {
     throw new TerminalJobError("This song is still processing.");
@@ -955,6 +969,7 @@ export async function loadProcessingJob(jobId: string): Promise<CompletedJobResu
     outputsExpireAt: materialized.expiresAt,
     displayName: job.displayName,
     sourceProvider: job.sourceProvider,
+    mixerSettings: normalizeMixerSettings(job.mixerSettings),
   };
 }
 
@@ -993,5 +1008,6 @@ export async function refreshLatestOutputs(
     outputsExpireAt: materialized.expiresAt,
     displayName: job.displayName,
     sourceProvider: job.sourceProvider,
+    mixerSettings: normalizeMixerSettings(job.mixerSettings),
   };
 }

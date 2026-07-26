@@ -9,6 +9,11 @@ export const MAX_PREVIEW_MANIFEST_BYTES = 524_288;
 export const PREVIEW_STEM_IDS = [
   "vocals",
   "drums",
+  "kick",
+  "snare",
+  "toms",
+  "hi_hat",
+  "cymbals",
   "bass",
   "guitars",
   "piano",
@@ -131,7 +136,7 @@ export function validatePreviewManifestV1(
   if (!isRecord(value.stems)) throw new Error("Preview stems must be an object.");
   const entries = Object.entries(value.stems);
   if (entries.length < 1 || entries.length > PREVIEW_STEM_IDS.length) {
-    throw new Error("Preview manifest must contain one to nine stems.");
+    throw new Error("Preview manifest must contain one to fourteen stems.");
   }
 
   const prefix = previewStreamPrefix(ownerUid, jobId, attempt);

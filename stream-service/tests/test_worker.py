@@ -262,6 +262,54 @@ class PayloadTests(unittest.TestCase):
         collision_selection = select_stem_outputs(duplicate)
         self.assertEqual(collision_selection["vocals"].key, "vocals")
 
+    def test_matches_drum_components_before_the_generic_drum_stem(self) -> None:
+        prefix = f"users/{OWNER}/jobs/{JOB}/outputs/"
+        outputs = [
+            OutputArtifact("drums", f"{prefix}drums.wav", "audio/wav", 6),
+            OutputArtifact(
+                "drums__kick",
+                f"{prefix}drums__kick.wav",
+                "audio/wav",
+                6,
+            ),
+            OutputArtifact(
+                "drum_snare",
+                f"{prefix}drum_snare.wav",
+                "audio/wav",
+                6,
+            ),
+            OutputArtifact(
+                "drums-toms",
+                f"{prefix}drums-toms.wav",
+                "audio/wav",
+                6,
+            ),
+            OutputArtifact(
+                "percussion_hi-hat",
+                f"{prefix}percussion_hi-hat.wav",
+                "audio/wav",
+                6,
+            ),
+            OutputArtifact(
+                "drums_cymbals",
+                f"{prefix}drums_cymbals.wav",
+                "audio/wav",
+                6,
+            ),
+        ]
+
+        selected = select_stem_outputs(outputs)
+
+        self.assertEqual(
+            list(selected),
+            ["drums", "kick", "snare", "toms", "hi_hat", "cymbals"],
+        )
+        self.assertEqual(selected["kick"].key, "drums__kick")
+        self.assertEqual(selected["snare"].key, "drum_snare")
+        self.assertEqual(selected["toms"].key, "drums-toms")
+        self.assertEqual(selected["hi_hat"].key, "percussion_hi-hat")
+        self.assertEqual(selected["cymbals"].key, "drums_cymbals")
+
     def test_common_duration_rounds_up_to_aac_packet(self) -> None:
         frames = common_duration_frames(
             [ProbeResult(Decimal("1.001"), 1), ProbeResult(Decimal("1.1"), 2)]

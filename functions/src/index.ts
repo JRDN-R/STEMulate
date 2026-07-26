@@ -52,6 +52,10 @@ import {
   type ResultSource,
 } from "./music-ai";
 import {
+  MixerSettingsValidationError,
+  normalizeMixerSettingsInput,
+} from "./mixer-settings";
+import {
   canonicalizeRemoteTrackUrl,
   remoteJobId,
   type RemoteProvider,
@@ -123,6 +127,11 @@ interface PreviewJobInput {
 interface RenameJobInput {
   jobId?: unknown;
   displayName?: unknown;
+}
+
+interface SaveMixerSettingsInput {
+  jobId?: unknown;
+  mixerSettings?: unknown;
 }
 
 interface SubmitTaskData {
@@ -1378,6 +1387,57 @@ export const renameProcessingJob = onCall<RenameJobInput>(
   },
 );
 
+export const saveProcessingJobMixerSettings = onCall<SaveMixerSettingsInput>(
+  {
+    cors: CALLABLE_CORS,
+    enforceAppCheck: true,
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (request) => {
+    const ownerUid = requireOwner(request);
+    const jobId = requiredString(request.data.jobId, "jobId", 128);
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) {
+      throw new HttpsError("invalid-argument", "jobId is invalid.");
+    }
+
+    let mixerSettings;
+    try {
+      mixerSettings = normalizeMixerSettingsInput(request.data.mixerSettings);
+    } catch (error) {
+      if (error instanceof MixerSettingsValidationError) {
+        throw new HttpsError("invalid-argument", error.message);
+      }
+      throw error;
+    }
+
+    const jobRef = publicJobRef(ownerUid, jobId);
+    await db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(jobRef);
+      if (!snapshot.exists) {
+        throw new HttpsError("not-found", "The processing job does not exist.");
+      }
+      const job = snapshot.data();
+      if (!job || job.ownerUid !== ownerUid) {
+        logger.error("A public job record has an invalid owner.", { jobId, ownerUid });
+        throw new HttpsError("internal", "The processing job record is invalid.");
+      }
+      if (job.status !== "completed") {
+        throw new HttpsError(
+          "failed-precondition",
+          "Mixer settings can only be saved after processing is complete.",
+        );
+      }
+      transaction.update(jobRef, {
+        mixerSettings,
+        mixerSettingsUpdatedAt: FieldValue.serverTimestamp(),
+      });
+    });
+
+    return { jobId, mixerSettings };
+  },
+);
+
 export const finalizeProcessingPreview = onObjectFinalized(
   {
     region: STORAGE_TRIGGER_REGION,
@@ -1725,7 +1785,7 @@ export const submitMusicAiJob = onTaskDispatched<SubmitTaskData>(
         jobId,
         ownerUid,
         "MUSIC_AI_SUBMISSION_UNCERTAIN",
-        `The ${workflowKey} workflow may have reached Music.ai, so STEMulate refused to submit a duplicate paid job. Review Music.ai before retrying.`,
+        `The ${workflowKey} processing request may have been accepted, so STEMulate stopped to avoid a duplicate paid job. Try again later or contact support.`,
       );
       return;
     }
@@ -1752,8 +1812,8 @@ export const submitMusicAiJob = onTaskDispatched<SubmitTaskData>(
         ownerUid,
         code,
         code === "MUSIC_AI_SUBMISSION_UNCERTAIN"
-          ? `The ${workflowKey} submission outcome is uncertain. Review Music.ai before retrying.`
-          : `Music.ai rejected the configured ${workflowKey} workflow request.`,
+          ? `The ${workflowKey} processing request outcome is uncertain. STEMulate stopped to avoid a duplicate paid job.`
+          : `The processing service rejected the configured ${workflowKey} request.`,
       );
       return;
     }
@@ -1940,7 +2000,7 @@ async function recordWorkflowSuccess(
       jobId,
       ownerUid,
       "MUSIC_AI_TOO_MANY_OUTPUTS",
-      "The configured Music.ai workflows returned too many output artifacts.",
+      "The configured processing workflows returned too many output artifacts.",
     );
     return;
   }
@@ -1950,7 +2010,7 @@ async function recordWorkflowSuccess(
       jobId,
       ownerUid,
       "MUSIC_AI_NO_OUTPUTS",
-      "The Music.ai workflows completed without downloadable output artifacts.",
+      "Processing completed without downloadable output artifacts.",
     );
     return;
   }
@@ -2069,7 +2129,7 @@ export const pollMusicAiJob = onTaskDispatched<PollTaskData>(
           jobId,
           ownerUid,
           "MUSIC_AI_POLL_REJECTED",
-          `Music.ai rejected the ${workflowKey} status request (HTTP ${error.status}).`,
+          `The processing service rejected the ${workflowKey} status request (HTTP ${error.status}).`,
         );
         return;
       }
@@ -2126,7 +2186,7 @@ export const pollMusicAiJob = onTaskDispatched<PollTaskData>(
         "MUSIC_AI_JOB_FAILED",
         // Remote error text can echo workflow parameters, including the signed
         // source URL. Keep it out of both logs and the client-readable record.
-        `Music.ai could not complete the ${workflowKey} workflow. Review the job in Music.ai for details.`,
+        `The processing service could not complete the ${workflowKey} workflow.`,
       );
       return;
     }

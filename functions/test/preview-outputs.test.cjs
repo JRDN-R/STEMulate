@@ -76,7 +76,7 @@ test("rejects path escapes, malformed metadata, and duplicate identities", () =>
   );
 });
 
-test("bounds task snapshots independently from the nine-stem manifest", () => {
+test("bounds task snapshots independently from the fourteen-stem manifest", () => {
   const prefix = "users/owner/jobs/job/outputs/";
   const outputs = Array.from({ length: 40 }, (_, index) => ({
     key: `output_${index}`,

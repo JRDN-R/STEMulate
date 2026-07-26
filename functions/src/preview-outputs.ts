@@ -31,7 +31,7 @@ function validContentType(value: unknown): value is string {
 /**
  * Copies the complete, bounded original-output snapshot into the private task.
  * The worker compares it with both public and internal job records before it
- * selects no more than nine canonical audio stems. Nothing here changes or
+ * selects no more than fourteen canonical audio stems. Nothing here changes or
  * replaces the original export artifacts.
  */
 export function preparePreviewOutputs(

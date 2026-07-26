@@ -155,6 +155,41 @@ class ManifestContractTests(unittest.TestCase):
         )
         self.assertEqual(parsed["codec"], "mp4a.40.2")
 
+    def test_accepts_canonical_drum_component_stems(self) -> None:
+        packet = adts_frame()
+        packets = parse_adts(packet * 3)
+        component_ids = ("kick", "snare", "toms", "hi_hat", "cymbals")
+        manifest = {
+            "version": 1,
+            "codec": "mp4a.40.2",
+            "bitstream": "adts",
+            "sampleRate": 48000,
+            "packetFrames": 1024,
+            "durationFrames": 2 * 1024,
+            "stems": {
+                stem_id: {
+                    "storagePath": expected_stream_path(
+                        OWNER,
+                        JOB,
+                        ATTEMPT,
+                        stem_id,
+                    ),
+                    "channels": 2,
+                    "sizeBytes": len(packet) * 3,
+                    "windows": build_windows(packets),
+                }
+                for stem_id in component_ids
+            },
+        }
+        payload = validate_task_payload(payload_value(), BUCKET)
+
+        parsed = validate_manifest_bytes(
+            json.dumps(manifest, separators=(",", ":")).encode(),
+            payload,
+        )
+
+        self.assertEqual(tuple(parsed["stems"]), component_ids)
+
     def test_rejects_path_window_duration_and_schema_deviations(self) -> None:
         packet = adts_frame()
         packets = parse_adts(packet * 2)

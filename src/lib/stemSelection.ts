@@ -1,14 +1,23 @@
 import {
   AUDIO_STEM_IDS,
+  DRUM_PART_STEM_IDS,
   createStemState,
   type AudioStemId,
+  type DrumPartStemId,
   type StemSources,
   type StemState,
 } from "./stems.ts";
 
 export const STEM_SELECTION_STORAGE_KEY = "stemulate.stem-selection.v1";
 
-export const STEM_SELECTION_PRESET_IDS = ["4", "5", "6", "7", "full"] as const;
+export const STEM_SELECTION_PRESET_IDS = [
+  "4",
+  "5",
+  "6",
+  "7",
+  "drum-parts",
+  "full",
+] as const;
 
 export type StemSelectionPresetId = (typeof STEM_SELECTION_PRESET_IDS)[number];
 export type StemSelectionMode = StemSelectionPresetId | "custom";
@@ -30,7 +39,18 @@ const PRESET_STEM_IDS: Record<StemSelectionPresetId, readonly AudioStemId[]> = {
   "5": ["vocals", "drums", "bass", "guitars", "other"],
   "6": ["vocals", "drums", "bass", "guitars", "piano", "other"],
   "7": ["vocals", "drums", "bass", "guitars", "piano", "keys", "other"],
-  full: AUDIO_STEM_IDS,
+  "drum-parts": ["vocals", ...DRUM_PART_STEM_IDS, "bass", "other"],
+  full: [
+    "vocals",
+    ...DRUM_PART_STEM_IDS,
+    "bass",
+    "guitars",
+    "piano",
+    "keys",
+    "strings",
+    "wind",
+    "other",
+  ],
 };
 
 export const STEM_SELECTION_PRESETS: readonly StemSelectionPreset[] = [
@@ -59,19 +79,30 @@ export const STEM_SELECTION_PRESETS: readonly StemSelectionPreset[] = [
     stemIds: PRESET_STEM_IDS["7"],
   },
   {
+    id: "drum-parts",
+    label: "Drum parts",
+    description: "Replaces the combined drums channel with separate kit pieces.",
+    stemIds: PRESET_STEM_IDS["drum-parts"],
+  },
+  {
     id: "full",
     label: "Full",
-    description: "Uses every supported STEMulate output.",
+    description: "Uses every supported instrument without doubling the drum kit.",
     stemIds: PRESET_STEM_IDS.full,
   },
 ];
 
 const AUDIO_STEM_ID_SET = new Set<string>(AUDIO_STEM_IDS);
+const DRUM_PART_STEM_ID_SET = new Set<string>(DRUM_PART_STEM_IDS);
 
 type StorageLike = Pick<Storage, "getItem" | "setItem">;
 
 function isAudioStemId(value: unknown): value is AudioStemId {
   return typeof value === "string" && AUDIO_STEM_ID_SET.has(value);
+}
+
+function isDrumPartStemId(value: AudioStemId): value is DrumPartStemId {
+  return DRUM_PART_STEM_ID_SET.has(value);
 }
 
 function uniqueStemIds(value: unknown): AudioStemId[] {
@@ -83,7 +114,11 @@ function uniqueStemIds(value: unknown): AudioStemId[] {
     seen.add(item);
     stemIds.push(item);
   }
-  return stemIds;
+  // A complete drum stem and its component stems contain the same material.
+  // Prefer the more specific component choice when persisted data contains both.
+  return stemIds.some(isDrumPartStemId)
+    ? stemIds.filter((id) => id !== "drums")
+    : stemIds;
 }
 
 function sameStemOrder(
@@ -110,8 +145,9 @@ export function stemSelectionForPreset(presetId: StemSelectionPresetId): StemSel
 export const DEFAULT_STEM_SELECTION: StemSelection = stemSelectionForPreset("4");
 
 /**
- * Treats saved selection data as untrusted. Only the nine fixed output IDs
+ * Treats saved selection data as untrusted. Only fixed output IDs
  * understood by STEMulate survive; unknown workflow/output names are dropped.
+ * Aggregate drums and drum parts are mutually exclusive to prevent doubling.
  */
 export function normalizeStemSelection(
   value: unknown,
@@ -142,9 +178,32 @@ export function toggleStemSelection(
   const current = normalizeStemSelection(selection);
   const selected = current.stemIds.includes(stemId);
   if (selected && current.stemIds.length === 1) return current;
-  const stemIds = selected
-    ? current.stemIds.filter((id) => id !== stemId)
-    : [...current.stemIds, stemId];
+  let stemIds: AudioStemId[];
+  if (selected) {
+    stemIds = current.stemIds.filter((id) => id !== stemId);
+  } else if (stemId === "drums") {
+    const firstPartIndex = current.stemIds.findIndex(isDrumPartStemId);
+    stemIds = current.stemIds.filter((id) => !isDrumPartStemId(id));
+    stemIds.splice(
+      firstPartIndex < 0 ? stemIds.length : Math.min(firstPartIndex, stemIds.length),
+      0,
+      "drums",
+    );
+  } else if (isDrumPartStemId(stemId)) {
+    const aggregateIndex = current.stemIds.indexOf("drums");
+    stemIds = current.stemIds.filter((id) => id !== "drums");
+    if (aggregateIndex >= 0) {
+      stemIds.splice(Math.min(aggregateIndex, stemIds.length), 0, stemId);
+    } else {
+      const lastPartIndex = stemIds.reduce(
+        (last, id, index) => isDrumPartStemId(id) ? index : last,
+        -1,
+      );
+      stemIds.splice(lastPartIndex < 0 ? stemIds.length : lastPartIndex + 1, 0, stemId);
+    }
+  } else {
+    stemIds = [...current.stemIds, stemId];
+  }
   return {
     mode: stemSelectionModeFor(stemIds),
     stemIds,
@@ -198,11 +257,53 @@ export function selectStemSources(
 ): StemSources {
   const current = normalizeStemSelection(selection);
   const selected: StemSources = {};
-  for (const stemId of current.stemIds) {
+  for (const stemId of resolvedStemIds(sources, current)) {
     const source = sources[stemId];
     if (source) selected[stemId] = source;
   }
   return selected;
+}
+
+/**
+ * Resolves the two interchangeable drum representations against one result.
+ * A component layout falls back to aggregate drums for older jobs. Conversely,
+ * an aggregate-drums layout expands to available parts when a workflow returns
+ * only the component stems.
+ */
+function resolvedStemIds(
+  sources: StemSources,
+  selection: StemSelection,
+): AudioStemId[] {
+  const current = normalizeStemSelection(selection);
+  const selectedParts = current.stemIds.filter(isDrumPartStemId);
+  const availableSelectedParts = selectedParts.filter((id) => Boolean(sources[id]));
+  const availableParts = DRUM_PART_STEM_IDS.filter((id) => Boolean(sources[id]));
+  const allSelectedPartsAvailable = selectedParts.length > 0
+    && availableSelectedParts.length === selectedParts.length;
+  const resolved: AudioStemId[] = [];
+  const add = (id: AudioStemId) => {
+    if (!resolved.includes(id)) resolved.push(id);
+  };
+
+  for (const id of current.stemIds) {
+    if (id === "drums") {
+      if (sources.drums) add("drums");
+      else availableParts.forEach((partId) => add(partId));
+      continue;
+    }
+    if (isDrumPartStemId(id)) {
+      if (allSelectedPartsAvailable) {
+        if (sources[id]) add(id);
+      } else if (sources.drums) {
+        add("drums");
+      } else if (sources[id]) {
+        add(id);
+      }
+      continue;
+    }
+    if (sources[id]) add(id);
+  }
+  return resolved;
 }
 
 /**
@@ -218,7 +319,7 @@ export function stemStatesForSelection(
   const current = normalizeStemSelection(selection);
   const hasOutputs = AUDIO_STEM_IDS.some((id) => Boolean(sources[id]));
   const visibleAudioIds = hasOutputs
-    ? current.stemIds.filter((id) => Boolean(sources[id]))
+    ? resolvedStemIds(sources, current)
     : current.stemIds;
   const previousById = new Map(previous.map((stem) => [stem.id, stem]));
   return [...visibleAudioIds, "metronome" as const].map((id) =>

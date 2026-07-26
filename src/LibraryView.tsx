@@ -147,7 +147,7 @@ export default function LibraryView({
       {!ownerUid && (
         <div className="song-library__empty">
           <strong>Sign in to open your library</strong>
-          <p>Your uploads and completed Music.ai projects will appear here.</p>
+          <p>Your uploads and completed song projects will appear here.</p>
         </div>
       )}
 

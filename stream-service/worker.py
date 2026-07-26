@@ -42,9 +42,18 @@ OWNER_UID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$")
 OUTPUT_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
+DRUM_COMPONENT_STEMS = (
+    "kick",
+    "snare",
+    "toms",
+    "hi_hat",
+    "cymbals",
+)
+
 CANONICAL_STEMS = (
     "vocals",
     "drums",
+    *DRUM_COMPONENT_STEMS,
     "bass",
     "guitars",
     "piano",
@@ -55,6 +64,17 @@ CANONICAL_STEMS = (
 )
 
 STEM_ALIASES: Mapping[str, frozenset[str]] = {
+    "kick": frozenset(
+        {"kick", "kicks", "kick_drum", "kick_drums", "kickdrum", "bass_drum"}
+    ),
+    "snare": frozenset(
+        {"snare", "snares", "snare_drum", "snare_drums", "snaredrum"}
+    ),
+    "toms": frozenset({"tom", "toms", "tom_drum", "tom_drums"}),
+    "hi_hat": frozenset(
+        {"hi_hat", "hi_hats", "hihat", "hihats", "high_hat", "high_hats"}
+    ),
+    "cymbals": frozenset({"cymbal", "cymbals"}),
     "vocals": frozenset({"vocal", "vocals", "voice", "voices", "lead_vocal", "lead_vocals"}),
     "drums": frozenset({"drum", "drums", "percussion"}),
     "bass": frozenset({"bass"}),
@@ -67,6 +87,14 @@ STEM_ALIASES: Mapping[str, frozenset[str]] = {
         {"other", "instrumental", "instruments", "accompaniment", "accompaniments"}
     ),
 }
+
+# A component output often contains both a generic drum token and its specific
+# part, such as ``drums__kick``. Resolve the five components before ``drums``
+# while retaining CANONICAL_STEMS as the stable manifest order.
+STEM_MATCH_ORDER = (
+    *DRUM_COMPONENT_STEMS,
+    *(stem_id for stem_id in CANONICAL_STEMS if stem_id not in DRUM_COMPONENT_STEMS),
+)
 
 
 def log_event(event: str, *, job_id: str | None = None, **fields: Any) -> None:
@@ -470,14 +498,25 @@ def validate_task_payload(value: Any, configured_bucket: str) -> TaskPayload:
     )
 
 
+def _name_tokens(value: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", value.lower())
+    tokens = set(words)
+    # Preserve common compound labels regardless of whether the source uses a
+    # space, hyphen, or underscore (hi-hat, hi_hat, and hi hat are equivalent).
+    for width in (2, 3):
+        tokens.update(
+            "_".join(words[start:start + width])
+            for start in range(len(words) - width + 1)
+        )
+    return tokens
+
+
 def canonical_stem_id(output: OutputArtifact) -> str | None:
     filename = output.storage_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-    combined = f"{output.key} {filename}".lower()
-    tokens = set(re.findall(r"[a-z0-9]+", combined))
-    underscored = set(re.findall(r"[a-z0-9]+(?:_[a-z0-9]+)+", combined))
-    for stem_id in CANONICAL_STEMS:
+    tokens = _name_tokens(output.key) | _name_tokens(filename)
+    for stem_id in STEM_MATCH_ORDER:
         aliases = STEM_ALIASES[stem_id]
-        if tokens.intersection(aliases) or underscored.intersection(aliases):
+        if tokens.intersection(aliases):
             return stem_id
     return None
 
@@ -500,7 +539,7 @@ def select_stem_outputs(outputs: Sequence[OutputArtifact]) -> dict[str, OutputAr
     if not selected:
         raise PreviewError(
             "NO_STEM_OUTPUTS",
-            "No supported Music.ai stem outputs were available for preview playback.",
+            "No supported stem outputs were available for preview playback.",
         )
     return {stem_id: selected[stem_id] for stem_id in CANONICAL_STEMS if stem_id in selected}
 

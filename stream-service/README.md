@@ -59,8 +59,12 @@ stem, trimmed to one common packet-aligned duration, and encoded by ffmpeg as
 AAC-LC in an ADTS stream. The supported IDs are:
 
 ```text
-vocals drums bass guitars piano keys strings wind other
+vocals drums kick snare toms hi_hat cymbals bass guitars piano keys strings wind other
 ```
+
+Drum-component names are matched before the generic `drums` stem, so outputs
+such as `drums__kick`, `drum-snare`, and `percussion_hi-hat` retain their
+specific component IDs.
 
 The service parses every ADTS header after encoding. It accepts only AAC-LC,
 48 kHz, one raw AAC block per packet, and mono or stereo channel
@@ -154,8 +158,8 @@ PREVIEW_BITRATE_KBPS=160
 WORK_ROOT=/work
 ```
 
-`PREVIEW_BITRATE_KBPS` accepts 64–320. At the default 160 kbps, nine stems use
-about 1.44 Mbps while actively streaming, before normal HTTP overhead.
+`PREVIEW_BITRATE_KBPS` accepts 64–320. At the default 160 kbps, fourteen stems
+use about 2.24 Mbps while actively streaming, before normal HTTP overhead.
 
 The service uses Application Default Credentials from its Cloud Run service
 account. Do not create a service-account key or set

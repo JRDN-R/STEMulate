@@ -15,6 +15,11 @@ import {
   getStemulateFirestore,
   getStemulateFunctions,
 } from "./firebase";
+import {
+  mixerSettingsEqual,
+  normalizeMixerSettings,
+  type SavedMixerSettingsV1,
+} from "./mixerSettings";
 
 export type SongLibraryStatus =
   | "awaiting_upload"
@@ -50,6 +55,14 @@ const VALID_JOB_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 function optionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function publicErrorMessage(value: unknown): string | null {
+  const message = optionalString(value);
+  if (!message) return null;
+  return /music\.ai/i.test(message)
+    ? "The processing service could not process this track."
+    : message;
 }
 
 function optionalNumber(value: unknown): number | null {
@@ -107,7 +120,7 @@ function libraryItemFromSnapshot(
     canOpen: status === "completed" && outputs.length > 0,
     createdAt: timestampMillis(data.createdAt),
     updatedAt: timestampMillis(data.updatedAt),
-    errorMessage: optionalString(error.message),
+    errorMessage: publicErrorMessage(error.message),
   };
 }
 
@@ -152,4 +165,34 @@ export async function renameSongLibraryItem(
     throw new Error("The backend returned an invalid rename result.");
   }
   return response.data.displayName;
+}
+
+export async function saveSongMixerSettings(
+  jobId: string,
+  settings: SavedMixerSettingsV1,
+): Promise<SavedMixerSettingsV1> {
+  if (!VALID_JOB_ID.test(jobId)) {
+    throw new Error("The saved song identifier is invalid.");
+  }
+  const normalized = normalizeMixerSettings(settings);
+  if (!normalized) {
+    throw new Error("The mixer settings are invalid.");
+  }
+  const saveMixerSettings = httpsCallable<
+    { jobId: string; mixerSettings: SavedMixerSettingsV1 },
+    { jobId: string; mixerSettings: unknown }
+  >(getStemulateFunctions(), "saveProcessingJobMixerSettings");
+  const response = await saveMixerSettings({
+    jobId,
+    mixerSettings: normalized,
+  });
+  const saved = normalizeMixerSettings(response.data.mixerSettings);
+  if (
+    response.data.jobId !== jobId
+    || !saved
+    || !mixerSettingsEqual(saved, normalized)
+  ) {
+    throw new Error("The backend returned an invalid mixer-settings result.");
+  }
+  return saved;
 }

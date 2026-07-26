@@ -24,6 +24,7 @@ import Plus from "lucide-react/dist/esm/icons/plus.mjs";
 import Radio from "lucide-react/dist/esm/icons/radio.mjs";
 import Repeat2 from "lucide-react/dist/esm/icons/repeat-2.mjs";
 import RotateCcw from "lucide-react/dist/esm/icons/rotate-ccw.mjs";
+import Save from "lucide-react/dist/esm/icons/save.mjs";
 import SlidersHorizontal from "lucide-react/dist/esm/icons/sliders-horizontal.mjs";
 import Sparkles from "lucide-react/dist/esm/icons/sparkles.mjs";
 import TimerReset from "lucide-react/dist/esm/icons/timer-reset.mjs";
@@ -52,6 +53,8 @@ import {
 import {
   createPanController,
   isStemAudible,
+  metronomePeakGain,
+  snapRangeValue,
 } from "./lib/audioMixer";
 import {
   remoteImportValidationMessage,
@@ -72,7 +75,14 @@ import {
 import {
   initialStemStates,
   isAudioStemId,
+  stemPresentationFor,
 } from "./lib/stems";
+import {
+  captureMixerSettings,
+  mixerSettingsEqual,
+  restoreMixerSettings,
+  type SavedMixerSettingsV1,
+} from "./lib/mixerSettings";
 import {
   loadStemSelection,
   saveStemSelection,
@@ -84,7 +94,10 @@ import {
   WorkerWavRangeWindowDecoder,
   probeWavRangeStreamingDeck,
 } from "./lib/wavRangeStreaming";
-import type { SongLibraryItem } from "./lib/songLibrary";
+import {
+  saveSongMixerSettings,
+  type SongLibraryItem,
+} from "./lib/songLibrary";
 import type {
   AnalysisData,
   AudioStemId,
@@ -323,7 +336,9 @@ function IconButton({
 function StemIcon({ id }: { id: StemId }) {
   const props = { size: 23, strokeWidth: 1.8, "aria-hidden": true };
   if (id === "vocals") return <Mic2 {...props} />;
-  if (id === "drums") return <Drum {...props} />;
+  if (["drums", "kick", "snare", "toms", "hi_hat", "cymbals"].includes(id)) {
+    return <Drum {...props} />;
+  }
   if (id === "bass") return <AudioLines {...props} />;
   if (id === "guitars") return <Guitar {...props} />;
   if (id === "piano") return <Piano {...props} />;
@@ -348,6 +363,9 @@ function StemRow({
   onToggleMute: () => void;
   onToggleSolo: () => void;
 }) {
+  const volumePointerActive = useRef(false);
+  const panPointerActive = useRef(false);
+  const defaultVolume = stemPresentationFor(stem.id).volume;
   const panLabel = stem.pan === 0
     ? "C"
     : `${Math.abs(stem.pan)}${stem.pan < 0 ? "L" : "R"}`;
@@ -357,20 +375,38 @@ function StemRow({
         <span className="stem-icon" aria-hidden="true"><StemIcon id={stem.id} /></span>
         <span className="stem-copy">
           <strong>{stem.label}</strong>
-          <small>{available ? "AI stem ready" : stem.id === "metronome" ? "Beat-map driven" : "Demo channel"}</small>
+          <small>{available ? "Stem ready" : stem.id === "metronome" ? "Beat-map driven" : "Demo channel"}</small>
         </span>
       </div>
       <label className="fader-wrap">
         <span className="sr-only">{stem.label} volume</span>
         <span className="fader-track" aria-hidden="true">
           <span className="fader-fill" style={{ width: `${stem.volume}%` }} />
+          <i className="range-detent" style={{ left: `${defaultVolume}%` }} />
         </span>
         <input
           type="range"
           min="0"
           max="100"
           value={stem.volume}
-          onChange={(event) => onVolume(Number(event.target.value))}
+          onPointerDown={() => {
+            volumePointerActive.current = true;
+          }}
+          onPointerUp={() => {
+            volumePointerActive.current = false;
+          }}
+          onPointerCancel={() => {
+            volumePointerActive.current = false;
+          }}
+          onBlur={() => {
+            volumePointerActive.current = false;
+          }}
+          onChange={(event) => {
+            const rawValue = Number(event.target.value);
+            onVolume(volumePointerActive.current
+              ? snapRangeValue(rawValue, defaultVolume, 3)
+              : rawValue);
+          }}
           aria-valuetext={`${stem.volume} percent`}
         />
       </label>
@@ -379,16 +415,34 @@ function StemRow({
         <button type="button" className={`mini-button solo ${stem.solo ? "active" : ""}`} aria-label={`${stem.solo ? "Unsolo" : "Solo"} ${stem.label}`} aria-pressed={stem.solo} onClick={onToggleSolo}>S</button>
         <label className="pan-control">
           <span>PAN</span>
-          <input
-            type="range"
-            min="-100"
-            max="100"
-            step="1"
-            value={stem.pan}
-            onChange={(event) => onPan(Number(event.target.value))}
-            aria-label={`${stem.label} stereo pan`}
-            aria-valuetext={stem.pan === 0 ? "Center" : `${Math.abs(stem.pan)} percent ${stem.pan < 0 ? "left" : "right"}`}
-          />
+          <span className="pan-slider">
+            <i className="pan-detent" aria-hidden="true" />
+            <input
+              type="range"
+              min="-100"
+              max="100"
+              step="1"
+              value={stem.pan}
+              onPointerDown={() => {
+                panPointerActive.current = true;
+              }}
+              onPointerUp={() => {
+                panPointerActive.current = false;
+              }}
+              onPointerCancel={() => {
+                panPointerActive.current = false;
+              }}
+              onBlur={() => {
+                panPointerActive.current = false;
+              }}
+              onChange={(event) => {
+                const rawValue = Number(event.target.value);
+                onPan(panPointerActive.current ? snapRangeValue(rawValue, 0, 5) : rawValue);
+              }}
+              aria-label={`${stem.label} stereo pan`}
+              aria-valuetext={stem.pan === 0 ? "Center" : `${Math.abs(stem.pan)} percent ${stem.pan < 0 ? "left" : "right"}`}
+            />
+          </span>
           <output aria-live="off">{panLabel}</output>
         </label>
         <output className="volume-readout" aria-live="off">{stem.volume}%</output>
@@ -541,14 +595,14 @@ function ImportModal({
           <form id="import-link-panel" role="tabpanel" aria-labelledby="import-link-tab" className="link-form" onSubmit={(event) => { event.preventDefault(); if (remoteReady && rightsConfirmed && url.trim()) onUrl(url.trim()); }}>
             <label><span>{spotifyEnabled ? "YouTube or Spotify track URL" : "YouTube video URL"}</span><input type="url" inputMode="url" autoComplete="url" placeholder="https://www.youtube.com/watch?v=…" value={url} onChange={(event) => setUrl(event.target.value)} disabled={busy || !remoteReady} required /></label>
             <p className="form-note">{spotifyEnabled ? "Supported YouTube links: youtube.com, youtu.be, music.youtube.com, mobile links, and Shorts. Or paste one open.spotify.com track. Playlists, albums, channels, and searches are not supported." : "Supported: youtube.com, youtu.be, music.youtube.com, mobile links, and Shorts for one public, non-live video. Playlists, channels, and searches are not supported."}</p>
-            <p className="form-note">Use only a single recording you created, own, or are authorized by both the rights holder and source service to download and send to Music.ai. Personal use alone does not grant those rights.</p>
-            {spotifyEnabled && <p className="form-note">spotDL uses Spotify metadata to find audio on YouTube/YouTube Music; it does not export Spotify audio.</p>}
+            <p className="form-note">Use only a single recording you created, own, or are authorized by both the rights holder and source service to download and process. Personal use alone does not grant those rights.</p>
+            {spotifyEnabled && <p className="form-note">Spotify links use track metadata to locate a matching recording on YouTube; no Spotify audio is exported.</p>}
             {!remoteReady && remoteUnavailableReason && <p className="form-note" role="status">{remoteUnavailableReason}</p>}
-            <label className="check-row"><input type="checkbox" checked={rightsConfirmed} onChange={(event) => setRightsConfirmed(event.target.checked)} disabled={busy || !remoteReady} required /><span>I confirm I have permission to download, process, and transmit this track to Music.ai.</span></label>
+            <label className="check-row"><input type="checkbox" checked={rightsConfirmed} onChange={(event) => setRightsConfirmed(event.target.checked)} disabled={busy || !remoteReady} required /><span>I confirm I have permission to download and process this track.</span></label>
             <button type="submit" className="primary-button" disabled={busy || !remoteReady || !rightsConfirmed || !url.trim()}>{busy ? "Starting…" : "Download & analyze"}<Sparkles size={18} /></button>
           </form>
         )}
-        <div className="privacy-note"><Cloud size={16} /><span>{mode === "link" ? "Remote audio is temporarily stored in private Firebase Storage and sent to Music.ai. Your Music.ai key stays on the secure backend." : "Your Music.ai key stays on the secure STEMulate backend. It is never shipped in this web app."}</span></div>
+        <div className="privacy-note"><Cloud size={16} /><span>{mode === "link" ? "Remote audio is temporarily stored in private cloud storage for processing." : "Processing credentials stay on the secure backend. They are never shipped in this web app."}</span></div>
       </div>
     </div>
   );
@@ -573,10 +627,10 @@ function SettingsSheet({
     <div className="modal-backdrop" role="presentation" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
       <aside ref={dialogRef} className="settings-sheet hardware-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabIndex={-1}>
         <div className="modal-head"><div><span className="eyebrow">SYSTEM</span><h2 id="settings-title">Deck settings</h2></div><IconButton label="Close settings" onClick={onClose}><X size={21} /></IconButton></div>
-        <div className="setting-row"><span className="setting-icon"><Radio size={19} /></span><span><strong>Processing backend</strong><small>{backendConfigured ? "Connected through Firebase" : "Demo mode · finish Firebase and App Check setup to go live"}</small></span><b className={backendConfigured ? "status-ok" : "status-demo"}>{backendConfigured ? "READY" : "DEMO"}</b></div>
-        <div className="setting-row"><span className="setting-icon"><Cloud size={19} /></span><span><strong>Owner access</strong><small>{userEmail || "Sign in after enabling Google Auth in Firebase"}</small></span>{userEmail ? <button type="button" className="text-button" onClick={onSignOut}>Sign out</button> : <button type="button" className="text-button" onClick={onSignIn}>Sign in</button>}</div>
+        <div className="setting-row"><span className="setting-icon"><Radio size={19} /></span><span><strong>Processing backend</strong><small>{backendConfigured ? "Connected securely" : "Demo mode · finish the secure backend setup to go live"}</small></span><b className={backendConfigured ? "status-ok" : "status-demo"}>{backendConfigured ? "READY" : "DEMO"}</b></div>
+        <div className="setting-row"><span className="setting-icon"><Cloud size={19} /></span><span><strong>Owner access</strong><small>{userEmail || "Sign in after enabling Google authentication"}</small></span>{userEmail ? <button type="button" className="text-button" onClick={onSignOut}>Sign out</button> : <button type="button" className="text-button" onClick={onSignIn}>Sign in</button>}</div>
         <div className="install-card"><strong>Add STEMulate to iPhone</strong><p>In Safari, tap Share, then <b>Add to Home Screen</b>. The controls already account for the iPhone safe area.</p></div>
-        <div className="about-card"><img src="./stemulate-logo.png" alt="" /><span><strong>STEMulate v0.1</strong><small>Local-first prototype · 1998 hardware edition</small></span></div>
+        <div className="about-card"><span><strong>STEMulate v0.1</strong><small>Local-first prototype · 1998 hardware edition</small></span></div>
       </aside>
     </div>
   );
@@ -616,6 +670,12 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [exportBusy, setExportBusy] = useState<"mix" | "stems" | null>(null);
   const [exportProgress, setExportProgress] = useState("");
+  const [mixerSaveBusy, setMixerSaveBusy] = useState(false);
+  const [mixerSaveBaseline, setMixerSaveBaseline] = useState<{
+    jobId: string;
+    settings: SavedMixerSettingsV1;
+    persisted: boolean;
+  } | null>(null);
   const [audioLoadStatus, setAudioLoadStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [audioLoadDetail, setAudioLoadDetail] = useState("");
   const [remoteResumeTrigger, setRemoteResumeTrigger] = useState(0);
@@ -635,12 +695,15 @@ export default function App() {
   const retriedWavSources = useRef<StemSources | null>(null);
   const pendingTransportPosition = useRef<number | null>(null);
   const pendingAudioSourceRefresh = useRef<StemSources | null>(null);
+  const pendingLocalMixerBaseline = useRef<SavedMixerSettingsV1 | null>(null);
   const mediaRequestGeneration = useRef(0);
   const activeJobIdRef = useRef(activeJobId);
   const audioSourcesRef = useRef(audioSources);
   const isPlayingRef = useRef(isPlaying);
   const currentTimeRef = useRef(currentTime);
   const stemsRef = useRef(stems);
+  const stemSelectionRef = useRef(stemSelection);
+  const mixerSaveBaselineRef = useRef(mixerSaveBaseline);
   const playbackRateRef = useRef(playbackRate);
   const [audioReloadTrigger, setAudioReloadTrigger] = useState(0);
   const loopRef = useRef({ enabled: loopEnabled, start: loopStart, end: loopEnd });
@@ -657,6 +720,8 @@ export default function App() {
   activeJobIdRef.current = activeJobId;
   audioSourcesRef.current = audioSources;
   stemsRef.current = stems;
+  stemSelectionRef.current = stemSelection;
+  mixerSaveBaselineRef.current = mixerSaveBaseline;
   playbackRateRef.current = playbackRate;
 
   const getStemTransport = useCallback((): PracticeTransport => {
@@ -677,6 +742,22 @@ export default function App() {
   const activeSection = activeSectionIndex >= 0 ? analysis.sections[activeSectionIndex] : undefined;
   const remaining = Math.max(0, duration - currentTime);
   const availableStemCount = Object.values(analysis.stems).filter(Boolean).length;
+  const currentMixerSettings = useMemo(
+    () => captureMixerSettings(stems, stemSelection),
+    [stems, stemSelection],
+  );
+  const mixerHasUnsavedChanges = Boolean(
+    activeJobId
+    && (
+      mixerSaveBaseline?.jobId !== activeJobId
+      || !mixerSettingsEqual(currentMixerSettings, mixerSaveBaseline?.settings)
+    ),
+  );
+  const mixerSettingsPersisted = Boolean(
+    activeJobId
+    && mixerSaveBaseline?.jobId === activeJobId
+    && mixerSaveBaseline.persisted,
+  );
   const modalOpen = importOpen || settingsOpen;
 
   const openImport = useCallback(() => {
@@ -1190,19 +1271,21 @@ export default function App() {
 
   const clickBeat = useCallback((accent: boolean) => {
     if (!metronomeEnabled) return;
-    const context = getStemTransport().getAudioContext();
+    const transport = getStemTransport();
+    const context = transport.getAudioContext();
     const oscillator = context.createOscillator();
     const gain = context.createGain();
     const pan = createPanController(context);
     const clickStem = stems.find((stem) => stem.id === "metronome");
-    const level = clickStem && isStemAudible(clickStem, stems)
-      ? (clickStem.volume / 100) * 0.18
-      : 0;
+    const level = metronomePeakGain(
+      clickStem?.volume ?? 0,
+      Boolean(clickStem && isStemAudible(clickStem, stems)),
+    );
     oscillator.frequency.value = accent ? 1320 : 880;
     gain.gain.setValueAtTime(level, context.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.055);
     pan.set((clickStem?.pan ?? 0) / 100, context);
-    oscillator.connect(gain).connect(pan.node).connect(context.destination);
+    oscillator.connect(gain).connect(pan.node).connect(transport.getOutputNode());
     oscillator.start();
     oscillator.stop(context.currentTime + 0.06);
   }, [getStemTransport, metronomeEnabled, stems]);
@@ -1368,6 +1451,30 @@ export default function App() {
     setStems((current) => stemStatesForSelection(analysis.stems, saved, current));
   };
 
+  const saveMixerAdjustments = async () => {
+    const jobId = activeJobIdRef.current;
+    if (!jobId || mixerSaveBusy) return;
+    const submitted = captureMixerSettings(stemsRef.current, stemSelectionRef.current);
+    setMixerSaveBusy(true);
+    try {
+      const saved = await saveSongMixerSettings(jobId, submitted);
+      if (activeJobIdRef.current !== jobId) return;
+      const baseline = { jobId, settings: saved, persisted: true };
+      mixerSaveBaselineRef.current = baseline;
+      setMixerSaveBaseline(baseline);
+      const latest = captureMixerSettings(stemsRef.current, stemSelectionRef.current);
+      setToast(mixerSettingsEqual(latest, saved)
+        ? "Mixer settings saved."
+        : "Saved. Your newer adjustments are still unsaved.");
+    } catch (error) {
+      if (activeJobIdRef.current === jobId) {
+        setToast(error instanceof Error ? error.message : "The mixer settings could not be saved.");
+      }
+    } finally {
+      setMixerSaveBusy(false);
+    }
+  };
+
   const exportAudio = async (kind: "mix" | "stems") => {
     if (!availableStemCount || exportBusy) {
       if (!availableStemCount) setToast("Finish processing a track before exporting audio.");
@@ -1409,7 +1516,12 @@ export default function App() {
     }
   };
 
-  const applyResult = (result: AnalysisData, preserveActivePlayback = false) => {
+  const applyResult = (
+    result: AnalysisData,
+    nextSelection: StemSelection,
+    nextStems: StemState[],
+    preserveActivePlayback = false,
+  ) => {
     setAnalysis({
       bpm: result.bpm,
       key: result.key,
@@ -1419,7 +1531,7 @@ export default function App() {
       stems: result.stems,
     });
     if (Object.values(result.stems).some(Boolean)) {
-      const nextSources = selectStemSources(result.stems, stemSelection);
+      const nextSources = selectStemSources(result.stems, nextSelection);
       const hasActiveSources = Object.values(audioSourcesRef.current).some(Boolean);
       if (preserveActivePlayback && hasActiveSources && isPlayingRef.current) {
         pendingAudioSourceRefresh.current = nextSources;
@@ -1430,15 +1542,50 @@ export default function App() {
         pendingAudioSourceRefresh.current = null;
         setAudioSources(nextSources);
       }
-      setStems((current) => stemStatesForSelection(result.stems, stemSelection, current));
     }
+    setStems(nextStems);
   };
 
   const applyCompletedResult = (
     result: CompletedJobResult,
     preserveActivePlayback = false,
+    preserveNewJobMixer = false,
   ) => {
-    applyResult(result.analysis, preserveActivePlayback);
+    const sameJob = activeJobIdRef.current === result.jobId;
+    const fallbackSelection = stemSelectionRef.current;
+    const serverRestored = restoreMixerSettings(
+      result.analysis.stems,
+      fallbackSelection,
+      result.mixerSettings,
+    );
+    const restored = sameJob || preserveNewJobMixer
+      ? {
+          selection: fallbackSelection,
+          stems: stemStatesForSelection(
+            result.analysis.stems,
+            fallbackSelection,
+            stemsRef.current,
+          ),
+        }
+      : serverRestored;
+    setStemSelection(restored.selection);
+    stemSelectionRef.current = restored.selection;
+    if (mixerSaveBaselineRef.current?.jobId !== result.jobId) {
+      const baseline = {
+        jobId: result.jobId,
+        settings: serverRestored.saved
+          ?? captureMixerSettings(serverRestored.stems, serverRestored.selection),
+        persisted: Boolean(serverRestored.saved),
+      };
+      mixerSaveBaselineRef.current = baseline;
+      setMixerSaveBaseline(baseline);
+    }
+    applyResult(
+      result.analysis,
+      restored.selection,
+      restored.stems,
+      preserveActivePlayback,
+    );
     activeJobIdRef.current = result.jobId;
     setActiveJobId(result.jobId);
   };
@@ -1457,10 +1604,10 @@ export default function App() {
       applyCompletedResult(result);
       setTrackTitle(result.displayName?.trim() || song.title);
       setTrackSource(result.sourceProvider === "spotify"
-        ? "Spotify track · spotDL → YouTube Music · Music.ai"
+        ? "Spotify import"
         : result.sourceProvider === "youtube"
-          ? "YouTube track · yt-dlp · Music.ai"
-          : "Uploaded file · Music.ai");
+          ? "YouTube import"
+          : "Uploaded file");
       setProcessingStage("ready");
       setProcessingDetail(`${song.title} is ready`);
       setIsPlaying(false);
@@ -1508,10 +1655,10 @@ export default function App() {
         applyCompletedResult(restored, true);
         if (restored.displayName) setTrackTitle(restored.displayName);
         setTrackSource(restored.sourceProvider === "spotify"
-          ? "Spotify track · spotDL → YouTube Music · Music.ai"
+          ? "Spotify import"
           : restored.sourceProvider === "youtube"
-            ? "YouTube track · yt-dlp · Music.ai"
-            : "Restored Music.ai session");
+            ? "YouTube import"
+            : "Restored session");
         if (!hadSourcesAtStart) seek(0);
         return;
       }
@@ -1623,18 +1770,34 @@ export default function App() {
     setTrackSource(`${file.type || "audio file"} · local preview`);
     activeJobIdRef.current = null;
     setActiveJobId(null);
+    mixerSaveBaselineRef.current = null;
+    setMixerSaveBaseline(null);
     setPreviewManifest(null);
     if (localObjectUrl.current) URL.revokeObjectURL(localObjectUrl.current);
     localObjectUrl.current = URL.createObjectURL(file);
     setAudioSources({ other: localObjectUrl.current });
-    setStems((current) => stemStatesForSelection({}, stemSelection, current));
+    const localMixerDefaults = stemStatesForSelection({}, stemSelectionRef.current);
+    pendingLocalMixerBaseline.current = captureMixerSettings(
+      localMixerDefaults,
+      stemSelectionRef.current,
+    );
+    stemsRef.current = localMixerDefaults;
+    setStems(localMixerDefaults);
     seek(0);
 
     try {
       if (backendConfigured) {
         const { analyzeFile } = await import("./lib/musicAi");
         const result = await analyzeFile(file, onStage, controller.signal);
-        applyCompletedResult(result);
+        const preserveLocalMixer = Boolean(
+          pendingLocalMixerBaseline.current
+          && !mixerSettingsEqual(
+            captureMixerSettings(stemsRef.current, stemSelectionRef.current),
+            pendingLocalMixerBaseline.current,
+          ),
+        );
+        applyCompletedResult(result, false, preserveLocalMixer);
+        pendingLocalMixerBaseline.current = null;
         setToast(`${file.name.replace(/\.[^.]+$/, "")} is ready in your library.`);
       } else await simulateAnalysis(file.name);
     } catch (error) {
@@ -1647,7 +1810,7 @@ export default function App() {
 
   const handleUrl = async (url: string) => {
     if (!backendConfigured) {
-      setToast("Remote imports require the secure Firebase backend.");
+      setToast("Remote imports require the secure cloud backend.");
       return;
     }
     if (!userEmail) {
@@ -1660,6 +1823,7 @@ export default function App() {
       return;
     }
     resetRemoteResume();
+    pendingLocalMixerBaseline.current = null;
     mediaRequestGeneration.current += 1;
     pendingAudioSourceRefresh.current = null;
     pendingPreviewManifest.current = null;
@@ -1672,6 +1836,8 @@ export default function App() {
     setActiveView("library");
     activeJobIdRef.current = null;
     setActiveJobId(null);
+    mixerSaveBaselineRef.current = null;
+    setMixerSaveBaseline(null);
     setPreviewManifest(null);
     onStage("download", "Preparing the private download job");
     let musicAi: typeof import("./lib/musicAi") | null = null;
@@ -1740,9 +1906,7 @@ export default function App() {
     <div className="app-bg">
       <div className="scanlines" aria-hidden="true" />
       <main ref={appShellRef} className={`app-shell ${activeView === "library" ? "library-mode" : ""}`}>
-        <header className="app-header">
-          <img className="brand-logo" src="./stemulate-logo.png" alt="STEMulate" />
-          <div className="brand-copy"><span className="eyebrow">AI PRACTICE DECK</span><strong>STEM<span>ULATE</span></strong><small>{backendConfigured ? "Music.ai engine armed" : "Interactive demo mode"}</small></div>
+        <header className="app-toolbar">
           <button type="button" className="menu-button hardware-button" aria-label="Open deck settings" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={openSettings}><Menu size={19} /><span>MENU</span><ChevronDown size={15} /></button>
         </header>
 
@@ -1827,7 +1991,38 @@ export default function App() {
 
         <div className="workspace-grid">
           <Panel className="mixer-panel" id="mixer">
-            <div className="panel-title-row"><div><span className="eyebrow">STEM MIXER</span><h2>Shape the rehearsal</h2></div><span className="engine-badge"><Activity size={15} />{availableStemCount ? `${availableStemCount} stems` : "Demo levels"}</span></div>
+            <div className="panel-title-row">
+              <div><span className="eyebrow">STEM MIXER</span><h2>Shape the rehearsal</h2></div>
+              <div className="mixer-header-actions">
+                <button
+                  type="button"
+                  className="mixer-save-button hardware-button"
+                  disabled={!activeJobId || !mixerHasUnsavedChanges || mixerSaveBusy}
+                  aria-label={!activeJobId
+                    ? "Mixer saving is available after this song finishes processing"
+                    : mixerSaveBusy
+                      ? "Saving mixer adjustments"
+                      : mixerHasUnsavedChanges
+                        ? "Save mixer adjustments for this song"
+                        : mixerSettingsPersisted
+                          ? "Mixer adjustments are saved"
+                          : "No mixer adjustments to save"}
+                  onClick={() => void saveMixerAdjustments()}
+                >
+                  <Save size={16} />
+                  <span>{!activeJobId
+                    ? "Save"
+                    : mixerSaveBusy
+                      ? "Saving…"
+                      : mixerHasUnsavedChanges
+                        ? "Save"
+                        : mixerSettingsPersisted
+                          ? "Saved"
+                          : "No changes"}</span>
+                </button>
+                <span className="engine-badge"><Activity size={15} />{availableStemCount ? `${availableStemCount} stems` : "Demo levels"}</span>
+              </div>
+            </div>
             <details className="stem-layout">
               <summary>
                 <SlidersHorizontal size={17} />
@@ -1840,7 +2035,7 @@ export default function App() {
                 heading="Stem layout and order"
               />
               <p className="stem-layout__note">
-                Presets use the outputs supported by this Music.ai workflow. Background vocals and individual drum parts require additional matching workflows before they can appear here.
+                Presets use the outputs available for this song. Individual drum parts appear when the selected separation setup provides them.
               </p>
             </details>
             <div className={`stem-stack ${stems.length > 6 ? "many-stems" : ""}`}>
@@ -1949,7 +2144,7 @@ export default function App() {
         remoteReady={backendConfigured && Boolean(userEmail)}
         remoteUnavailableReason={backendConfigured
           ? "Sign in as the owner from Menu to enable remote imports."
-          : "Configure the secure Firebase backend to enable remote imports."}
+          : "Configure the secure cloud backend to enable remote imports."}
         spotifyEnabled={spotifyImportEnabled}
       />
       <SettingsSheet

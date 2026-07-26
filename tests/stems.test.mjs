@@ -17,6 +17,11 @@ test("loads every useful Basic Stems - Auto output and skips the original mix", 
   assert.deepEqual(normalizeStemOutputs(result), {
     vocals: "https://cdn.music.ai/job/example/vocals.wav",
     drums: "https://cdn.music.ai/job/example/drums.wav",
+    kick: "https://cdn.music.ai/job/example/kick.wav",
+    snare: "https://cdn.music.ai/job/example/snare.wav",
+    toms: "https://cdn.music.ai/job/example/toms.wav",
+    hi_hat: "https://cdn.music.ai/job/example/hi_hat.wav",
+    cymbals: "https://cdn.music.ai/job/example/cymbals.wav",
     bass: "https://cdn.music.ai/job/example/bass.wav",
     guitars: "https://cdn.music.ai/job/example/guitars.wav",
     piano: "https://cdn.music.ai/job/example/piano.wav",
@@ -24,6 +29,26 @@ test("loads every useful Basic Stems - Auto output and skips the original mix", 
     strings: "https://cdn.music.ai/job/example/strings.wav",
     wind: "https://cdn.music.ai/job/example/wind.wav",
     other: "https://cdn.music.ai/job/example/other.wav",
+  });
+});
+
+test("matches specific drum-part outputs before the combined drums stem", () => {
+  const result = {
+    drums: "https://cdn.music.ai/job/example/drums.wav",
+    kick_drum: "https://cdn.music.ai/job/example/kick-drum.wav",
+    snare_drum: "https://cdn.music.ai/job/example/snare-drum.wav",
+    tom: "https://cdn.music.ai/job/example/tom.wav",
+    hi_hat: "https://cdn.music.ai/job/example/hi-hat.wav",
+    cymbal: "https://cdn.music.ai/job/example/cymbal.wav",
+  };
+
+  assert.deepEqual(normalizeStemOutputs(result), {
+    drums: "https://cdn.music.ai/job/example/drums.wav",
+    kick: "https://cdn.music.ai/job/example/kick-drum.wav",
+    snare: "https://cdn.music.ai/job/example/snare-drum.wav",
+    toms: "https://cdn.music.ai/job/example/tom.wav",
+    hi_hat: "https://cdn.music.ai/job/example/hi-hat.wav",
+    cymbals: "https://cdn.music.ai/job/example/cymbal.wav",
   });
 });
 

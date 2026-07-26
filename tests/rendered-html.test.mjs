@@ -8,7 +8,7 @@ const dist = new URL("../dist/", import.meta.url);
 test("builds a GitHub Pages-compatible app shell", async () => {
   const html = await readFile(new URL("index.html", dist), "utf8");
 
-  assert.match(html, /<title>STEMulate — AI Practice Deck<\/title>/i);
+  assert.match(html, /<title>STEMulate<\/title>/i);
   assert.match(html, /viewport-fit=cover/i);
   assert.match(html, /apple-mobile-web-app-capable/i);
   assert.match(html, /href="\.\/manifest\.webmanifest"/i);
@@ -19,7 +19,7 @@ test("builds a GitHub Pages-compatible app shell", async () => {
 test("ships the PWA assets with relative scope", async () => {
   const manifest = JSON.parse(await readFile(new URL("manifest.webmanifest", dist), "utf8"));
 
-  assert.equal(manifest.name, "STEMulate — AI Practice Deck");
+  assert.equal(manifest.name, "STEMulate");
   assert.equal(manifest.start_url, "./");
   assert.equal(manifest.scope, "./");
   assert.equal(manifest.display, "standalone");
@@ -67,7 +67,8 @@ test("never places a Music.ai API key in the browser build", async () => {
 
   assert.doesNotMatch(bundleText, /MUSIC_AI_API_KEY\s*[=:]\s*["'][^"']+["']/i);
   assert.doesNotMatch(bundleText, /api\.music\.ai\/v1\/job/i);
-  assert.match(bundleText, /secure Firebase backend/i);
+  assert.doesNotMatch(bundleText, /Music\.ai/i);
+  assert.match(bundleText, /secure cloud backend/i);
 });
 
 test("keeps deployment configuration outside the public artifact", async () => {

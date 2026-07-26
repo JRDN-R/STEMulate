@@ -2,7 +2,7 @@
   "name": "stemulate",
   "version": "0.1.0",
   "private": true,
-  "description": "A mobile-first practice and stem-mixing PWA powered by Music.ai.",
+  "description": "A mobile-first practice and stem-mixing PWA.",
   "engines": {
     "node": ">=20.0.0"
   },

@@ -4,6 +4,7 @@ import type {
   StemSources,
   StemState,
 } from "./lib/stems";
+import type { SavedMixerSettingsV1 } from "./lib/mixerSettings";
 
 export type {
   AudioStemId,
@@ -17,6 +18,11 @@ export type {
   StemSelectionPreset,
   StemSelectionPresetId,
 } from "./lib/stemSelection";
+export type {
+  MixerChannelSettings,
+  RestoredMixerSettings,
+  SavedMixerSettingsV1,
+} from "./lib/mixerSettings";
 
 export type ChordEvent = {
   chord: string;
@@ -52,6 +58,7 @@ export type CompletedJobResult = {
   outputsExpireAt: number;
   displayName?: string;
   sourceProvider?: RemoteSourceProvider;
+  mixerSettings?: SavedMixerSettingsV1 | null;
 };
 
 export type RemoteTrackResult = CompletedJobResult & {

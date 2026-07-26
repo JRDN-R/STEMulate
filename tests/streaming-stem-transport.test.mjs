@@ -45,6 +45,18 @@ class FakePannerNode extends FakeNode {
   pan = new FakeAudioParam();
 }
 
+class FakeDynamicsCompressorNode extends FakeNode {
+  threshold = new FakeAudioParam();
+
+  knee = new FakeAudioParam();
+
+  ratio = new FakeAudioParam();
+
+  attack = new FakeAudioParam();
+
+  release = new FakeAudioParam();
+}
+
 class FakeAudioBuffer {
   constructor(numberOfChannels, length, sampleRate) {
     this.numberOfChannels = numberOfChannels;
@@ -97,6 +109,8 @@ class FakeAudioContext {
 
   panners = [];
 
+  compressors = [];
+
   listeners = new Map();
 
   resumeCount = 0;
@@ -112,6 +126,12 @@ class FakeAudioContext {
   createStereoPanner() {
     const node = new FakePannerNode();
     this.panners.push(node);
+    return node;
+  }
+
+  createDynamicsCompressor() {
+    const node = new FakeDynamicsCompressorNode();
+    this.compressors.push(node);
     return node;
   }
 
@@ -231,6 +251,22 @@ function transportOptions(context, decoder, overrides = {}) {
     ...overrides,
   };
 }
+
+test("routes the shared output through a peak limiter", async () => {
+  const context = new FakeAudioContext();
+  const decoder = new FakeDecoder();
+  const transport = new StreamingStemTransport(transportOptions(context, decoder));
+
+  await transport.load(deck());
+  const limiter = context.compressors[0];
+  const output = transport.getOutputNode();
+
+  assert.equal(output, context.gains[0]);
+  assert.deepEqual(output.connections, [limiter]);
+  assert.deepEqual(limiter.connections, [context.destination]);
+  assert.equal(limiter.threshold.value, -3);
+  assert.equal(limiter.ratio.value, 20);
+});
 
 test("schedules every decoded stem on one exact AudioContext timestamp", async () => {
   const context = new FakeAudioContext();

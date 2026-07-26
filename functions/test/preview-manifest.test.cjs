@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  PREVIEW_STEM_IDS,
   previewManifestPath,
   previewStreamPrefix,
   validatePreviewManifestV1,
@@ -61,6 +62,43 @@ test("validates and sanitizes the versioned ADTS manifest", () => {
   assert.equal(
     previewManifestPath(ownerUid, jobId, attempt),
     `users/${ownerUid}/jobs/${jobId}/streams/v1/attempt-${attempt}/manifest.json`,
+  );
+});
+
+test("accepts the five canonical drum-component preview IDs", () => {
+  assert.deepEqual(PREVIEW_STEM_IDS, [
+    "vocals",
+    "drums",
+    "kick",
+    "snare",
+    "toms",
+    "hi_hat",
+    "cymbals",
+    "bass",
+    "guitars",
+    "piano",
+    "keys",
+    "strings",
+    "wind",
+    "other",
+  ]);
+
+  const baseStem = validManifest().stems.vocals;
+  const raw = validManifest();
+  raw.stems = Object.fromEntries(
+    ["kick", "snare", "toms", "hi_hat", "cymbals"].map((stemId) => [
+      stemId,
+      {
+        ...structuredClone(baseStem),
+        storagePath: `${previewStreamPrefix(ownerUid, jobId, attempt)}${stemId}.aac`,
+      },
+    ]),
+  );
+
+  const manifest = validatePreviewManifestV1(raw, ownerUid, jobId, attempt);
+  assert.deepEqual(
+    Object.keys(manifest.stems),
+    ["kick", "snare", "toms", "hi_hat", "cymbals"],
   );
 });
 
