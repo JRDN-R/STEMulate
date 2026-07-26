@@ -554,7 +554,8 @@ final class FirebaseBackendService {
         metadata: StorageMetadata,
         progress: (@MainActor @Sendable (Double) -> Void)?
     ) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             let task = reference.putFile(from: fileURL, metadata: metadata) { _, error in
                 if let error {
                     continuation.resume(throwing: error)
