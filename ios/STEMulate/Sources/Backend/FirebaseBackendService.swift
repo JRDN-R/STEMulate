@@ -13,6 +13,70 @@ private final class FirestoreListenerBox: @unchecked Sendable {
     }
 }
 
+private final class StorageUploadState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var task: StorageUploadTask?
+    private var isCancelled = false
+    private var isFinished = false
+
+    func install(_ continuation: CheckedContinuation<Void, Error>) {
+        lock.lock()
+        if isCancelled {
+            isFinished = true
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+        } else {
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    func install(_ task: StorageUploadTask) {
+        lock.lock()
+        self.task = task
+        let shouldCancel = isCancelled || isFinished
+        lock.unlock()
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
+    func finish(_ result: Result<Void, Error>) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        let continuation = continuation
+        self.continuation = nil
+        task = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+
+    func cancel() {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isCancelled = true
+        let task = task
+        let continuation = continuation
+        if continuation != nil {
+            isFinished = true
+            self.continuation = nil
+            self.task = nil
+        }
+        lock.unlock()
+
+        task?.cancel()
+        continuation?.resume(throwing: CancellationError())
+    }
+}
+
 @MainActor
 final class FirebaseBackendService {
     private let ownerSession: GoogleOwnerSession
@@ -554,23 +618,33 @@ final class FirebaseBackendService {
         metadata: StorageMetadata,
         progress: (@MainActor @Sendable (Double) -> Void)?
     ) async throws {
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, Error>) in
-            let task = reference.putFile(from: fileURL, metadata: metadata) { _, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
+        let state = StorageUploadState()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                state.install(continuation)
+                let task = reference.putFile(
+                    from: fileURL,
+                    metadata: metadata
+                ) { _, error in
+                    if let error {
+                        state.finish(.failure(error))
+                    } else {
+                        state.finish(.success(()))
+                    }
                 }
-            }
-            if let progress {
-                task.observe(.progress) { snapshot in
-                    let completed = snapshot.progress?.fractionCompleted ?? 0
-                    Task { @MainActor in
-                        progress(min(max(completed, 0), 1))
+                state.install(task)
+                if let progress {
+                    task.observe(.progress) { snapshot in
+                        let completed = snapshot.progress?.fractionCompleted ?? 0
+                        Task { @MainActor in
+                            progress(min(max(completed, 0), 1))
+                        }
                     }
                 }
             }
+        } onCancel: {
+            state.cancel()
         }
     }
 }

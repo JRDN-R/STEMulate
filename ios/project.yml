@@ -18,6 +18,9 @@ packages:
   GoogleSignIn:
     url: https://github.com/google/GoogleSignIn-iOS.git
     from: 8.0.0
+  YouTubeKit:
+    url: https://github.com/alexeichhorn/YouTubeKit.git
+    revision: 7cc81901f9bbf2f9d2766bd8a54e128b974e4c94
 
 settings:
   base:
@@ -72,6 +75,8 @@ targets:
         product: GoogleSignIn
       - package: GoogleSignIn
         product: GoogleSignInSwift
+      - package: YouTubeKit
+        product: YouTubeKit
 
   STEMulateTests:
     type: bundle.unit-test

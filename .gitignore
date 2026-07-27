@@ -47,3 +47,13 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# Native iOS generated files and machine-local signing/Firebase configuration
+/ios/.tools/
+/ios/Config/AppCheck.xcconfig
+/ios/Config/Firebase.xcconfig
+/ios/Config/Install.local
+/ios/Config/Local.xcconfig
+/ios/DerivedData/
+/ios/STEMulate.xcodeproj/
+/ios/STEMulate/Resources/GoogleService-Info.plist

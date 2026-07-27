@@ -22,6 +22,7 @@ final class STEMulateAppModel: ObservableObject {
     @Published private(set) var selectedAnalysis: HydratedSongAnalysis?
     @Published private(set) var localDeck: LocalStemDeck?
     @Published private(set) var isImporting = false
+    @Published private(set) var youtubeImportProgress: Double?
     @Published private(set) var uploadProgress: Double?
     @Published private(set) var isSavingMixer = false
     @Published private(set) var saveConfirmation: String?
@@ -34,6 +35,7 @@ final class STEMulateAppModel: ObservableObject {
     private let backend: FirebaseBackendService
     private let cache = StemFileCache()
     private let downloader = SignedStemDownloader()
+    private let youtubeImporter = OnDeviceYouTubeImporter()
     private var hasStartedLibrary = false
 
     init(ownerSession: GoogleOwnerSession) {
@@ -103,33 +105,57 @@ final class STEMulateAppModel: ObservableObject {
     }
 
     @discardableResult
-    func importRemote(link: String, rightsConfirmed: Bool) async -> Bool {
+    func importYouTube(link: String, rightsConfirmed: Bool) async -> Bool {
         guard !isImporting else { return false }
-        let cleanLink = link.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: cleanLink) else {
+        guard rightsConfirmed else {
             showError(
-                BackendError.uploadRejected("Enter a valid YouTube or Spotify link."),
+                BackendError.uploadRejected(
+                    "Confirm that you have permission to process this track."
+                ),
                 title: "Check the link"
             )
             return false
         }
+        let videoLink: YouTubeVideoLink
+        do {
+            videoLink = try YouTubeVideoLink.parse(link)
+        } catch {
+            showError(error, title: "Check the link")
+            return false
+        }
 
         isImporting = true
-        transientStatus = "Starting remote import…"
+        youtubeImportProgress = 0
+        transientStatus = "Resolving YouTube audio on this iPhone…"
         defer {
             isImporting = false
+            youtubeImportProgress = nil
             transientStatus = nil
         }
 
         do {
-            _ = try await backend.createRemoteImport(
-                url: url,
-                rightsConfirmed: rightsConfirmed
-            )
+            if #available(iOS 26.0, *) {
+                try await ContinuedImportTaskController.shared.perform(
+                    title: "Importing \(videoLink.videoID)",
+                    subtitle: "Preparing audio on this iPhone"
+                ) { [weak self] systemProgress in
+                    guard let self else { throw CancellationError() }
+                    try await self.performYouTubeImport(
+                        videoLink,
+                        systemProgress: systemProgress
+                    )
+                }
+            } else {
+                let systemProgress = Progress(totalUnitCount: 1_000)
+                try await performYouTubeImport(
+                    videoLink,
+                    systemProgress: systemProgress
+                )
+            }
             selectedTab = .library
             return true
         } catch {
-            showError(error, title: "Import couldn’t start")
+            showError(error, title: "YouTube import failed")
             return false
         }
     }
@@ -156,6 +182,44 @@ final class STEMulateAppModel: ObservableObject {
         } catch {
             showError(error, title: "Upload failed")
         }
+    }
+
+    private func performYouTubeImport(
+        _ videoLink: YouTubeVideoLink,
+        systemProgress: Progress
+    ) async throws {
+        systemProgress.totalUnitCount = 1_000
+        systemProgress.completedUnitCount = 0
+
+        let staged = try await youtubeImporter.download(
+            videoLink,
+            progress: { [weak self] progress in
+                let overall = progress * 0.58
+                self?.youtubeImportProgress = overall
+                if progress >= 0.53 {
+                    self?.transientStatus = "Refreshing the YouTube audio address…"
+                } else if progress >= 0.08 {
+                    self?.transientStatus = "Downloading audio on this iPhone…"
+                }
+                systemProgress.completedUnitCount = Int64((overall * 1_000).rounded())
+            }
+        )
+        defer { staged.remove() }
+
+        transientStatus = "Uploading \(staged.displayName)…"
+        youtubeImportProgress = 0.58
+        systemProgress.completedUnitCount = 580
+        _ = try await backend.importLocalFile(
+            at: staged.localURL,
+            displayName: staged.displayName,
+            progress: { [weak self] progress in
+                let overall = 0.58 + (progress * 0.41)
+                self?.youtubeImportProgress = overall
+                systemProgress.completedUnitCount = Int64((overall * 1_000).rounded())
+            }
+        )
+        youtubeImportProgress = 1
+        systemProgress.completedUnitCount = 1_000
     }
 
     func prepare(_ job: ProcessingJob) async {
